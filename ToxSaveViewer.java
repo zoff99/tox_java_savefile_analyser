@@ -509,7 +509,7 @@ public class ToxSaveViewer extends JFrame {
         String details = "";
     }
 
-    /** Parses one group entry (array of 7 items) from group_pack.c. Returns null on error. */
+    /** Parses one group entry (array of 7 items) from group_pack.c. */
     private GroupInfo parseOneGroup(MsgPack mp) {
         try {
             if (!mp.readArraySizeFixed(7)) return null;
@@ -530,11 +530,11 @@ public class ToxSaveViewer extends JFrame {
 
             // [2] state binary: array(5)
             if (!mp.readArraySizeFixed(5)) return null;
-            byte[] sig = mp.readBinFixed(64);               // SIGNATURE_SIZE (64)
-            byte[] founderPk = mp.readBinFixed(64);         // EXT_PUBLIC_KEY_SIZE (64)
+            byte[] sig = mp.readBinFixed(64);               
+            byte[] founderPk = mp.readBinFixed(64);         
             byte[] nameBytes = mp.readBinFixed(nameLen);
             byte[] pwd = mp.readBinFixed(pwdLen);
-            byte[] modHash = mp.readBinFixed(32);           // MOD_MODERATION_HASH_SIZE (32)
+            byte[] modHash = mp.readBinFixed(32);           
 
             gi.name = new String(nameBytes, StandardCharsets.UTF_8);
 
@@ -544,26 +544,27 @@ public class ToxSaveViewer extends JFrame {
             int topicLen = (int) mp.readUint();
             long topicChecksum = mp.readUint();
             byte[] topicBytes = mp.readBinFixed(topicLen);
-            byte[] topicSigPk = mp.readBinFixed(32);        // SIG_PUBLIC_KEY_SIZE (32)
-            byte[] topicSig = mp.readBinFixed(64);          // SIGNATURE_SIZE (64)
+            byte[] topicSigPk = mp.readBinFixed(32);        
+            byte[] topicSig = mp.readBinFixed(64);          
 
             String topicStr = new String(topicBytes, StandardCharsets.UTF_8);
 
             // [4] mod list: array(2)
             if (!mp.readArraySizeFixed(2)) return null;
             int numMods = (int) mp.readUint();
+            byte[] modListBlob = null;
             if (numMods == 0) {
                 mp.readNil();
             } else {
-                mp.readBinFixed(numMods * 32);              // MOD_LIST_ENTRY_SIZE is 32
+                modListBlob = mp.readBinFixed(numMods * 32);
             }
 
             // [5] keys: array(4)
             if (!mp.readArraySizeFixed(4)) return null;
-            byte[] chatPub = mp.readBinFixed(64);           // EXT_PUBLIC_KEY_SIZE (64)
-            byte[] chatSec = mp.readBinFixed(96);           // EXT_SECRET_KEY_SIZE (96 = 32 enc + 64 sig) <--- FIXED
-            byte[] selfPub = mp.readBinFixed(64);           // EXT_PUBLIC_KEY_SIZE (64)
-            byte[] selfSec = mp.readBinFixed(96);           // EXT_SECRET_KEY_SIZE (96) <--- FIXED
+            byte[] chatPub = mp.readBinFixed(64);           
+            byte[] chatSec = mp.readBinFixed(96);           
+            byte[] selfPub = mp.readBinFixed(64);           
+            byte[] selfSec = mp.readBinFixed(96);           
 
             // [6] self info: array(4)
             if (!mp.readArraySizeFixed(4)) return null;
@@ -576,34 +577,53 @@ public class ToxSaveViewer extends JFrame {
             // [7] saved peers: array(2)
             if (!mp.readArraySizeFixed(2)) return null;
             int savedPeerBytes = (int) mp.readUint();
+            byte[] savedPeersBlob = null;
             if (savedPeerBytes == 0) {
                 mp.readNil();
             } else {
-                mp.readBinFixed(savedPeerBytes);
+                savedPeersBlob = mp.readBinFixed(savedPeerBytes);
             }
 
+            // --- Build Details String ---
             det.append("Group: \"").append(gi.name).append("\"\n");
-            det.append("State:           ").append(disconnected ? "DISCONNECTED (left/disabled)" : "CONNECTING/CONNECTED").append("\n");
+            det.append("State:           ").append(disconnected ? "DISCONNECTED" : "CONNECTING/CONNECTED").append("\n");
             det.append("Privacy:         ").append(privacy == 0 ? "PUBLIC" : "PRIVATE").append("\n");
             det.append("Voice:           ").append(voiceName(voice)).append("\n");
-            det.append("Topic lock:      ").append(topicLock == 0 ? "ENABLED (mods only)" : "DISABLED").append("\n");
+            det.append("Topic lock:      ").append(topicLock == 0 ? "ENABLED" : "DISABLED").append("\n");
             det.append("Max peers:       ").append(maxPeers).append("\n");
             det.append("State version:   ").append(version).append("\n");
             det.append("Password:        ").append(pwdLen > 0 ? "set (" + pwdLen + " bytes)" : "none").append("\n");
             det.append("Topic:           ").append(topicStr.isEmpty() ? "(empty)" : "\"" + topicStr + "\"").append("\n");
             det.append("Topic version:   ").append(topicVersion).append("\n");
-            det.append("Moderators:      ").append(numMods).append("\n");
-            // Chat ID is the first 32 bytes of the extended public key
             det.append("Chat ID:         ").append(hex(Arrays.copyOfRange(chatPub, 0, 32))).append("\n");
+            det.append("Founder enc pk:  ").append(hex(Arrays.copyOfRange(founderPk, 0, 32))).append("\n");
+            det.append("Mod list hash:   ").append(hex(modHash)).append("\n");
+            
+            det.append("\n--- Self Info ---\n");
             det.append("Self nick:       ").append(selfNick.isEmpty() ? "(empty)" : "\"" + selfNick + "\"").append("\n");
             det.append("Self role:       ").append(roleName(selfRole)).append("\n");
             det.append("Self status:     ").append(userStatusName(selfStatus)).append("\n");
-            det.append("Saved peer data: ").append(savedPeerBytes).append(" bytes\n");
-            det.append("Founder enc pk:  ").append(hex(Arrays.copyOfRange(founderPk, 0, 32))).append("\n");
+            det.append("Self enc pk:     ").append(hex(Arrays.copyOfRange(selfPub, 0, 32))).append("\n");
+            det.append("Self sig pk:     ").append(hex(Arrays.copyOfRange(selfPub, 32, 64))).append("\n");
+            
+            det.append("\n--- Keys ---\n");
+            det.append("Chat pub:        ").append(hex(chatPub)).append("\n");
+            det.append("Chat sec:        ").append(hex(chatSec)).append("\n");
+            det.append("Self pub:        ").append(hex(selfPub)).append("\n");
+            det.append("Self sec:        ").append(hex(selfSec)).append("\n");
+            det.append("State sig:       ").append(hex(sig)).append("\n");
+            det.append("Topic sig pk:    ").append(hex(topicSigPk)).append("\n");
+            det.append("Topic sig:       ").append(hex(topicSig)).append("\n");
+            
+            det.append("\n--- Moderators (").append(numMods).append(") ---");
+            det.append(parseMods(modListBlob, numMods)).append("\n");
+            
+            det.append("\n--- Saved Peers (").append(savedPeerBytes).append(" bytes) ---");
+            det.append(parseSavedPeers(savedPeersBlob)).append("\n");
+
             gi.details = det.toString();
             return gi;
         } catch (Exception e) {
-            // Throw exact error position if it fails again
             throw new RuntimeException("MsgPack parse error at pos " + mp.getPosition() + ": " + e.getMessage(), e);
         }
     }
@@ -742,6 +762,101 @@ public class ToxSaveViewer extends JFrame {
         } catch (Exception e) {
             sb.append("Groups data (").append(d.length).append(" bytes): could not read msgpack array header.\n");
             sb.append("Error: ").append(e.getMessage()).append("\nSee hex dump.");
+        }
+        return sb.toString();
+    }
+
+        private String formatIPv6(byte[] b, int off) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 16; i += 2) {
+            if (i > 0) sb.append(":");
+            sb.append(String.format("%02x%02x", b[off+i]&0xFF, b[off+i+1]&0xFF));
+        }
+        return sb.toString();
+    }
+
+    private String parseMods(byte[] blob, int numMods) {
+        if (numMods == 0 || blob == null) return "(none)";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < numMods; i++) {
+            int start = i * 32;
+            if (start + 32 <= blob.length) {
+                sb.append("\n  [Mod ").append(i).append("] Sig PK: ").append(hex(Arrays.copyOfRange(blob, start, start + 32)));
+            }
+        }
+        return sb.toString();
+    }
+
+    private String parseSavedPeers(byte[] blob) {
+        if (blob == null || blob.length == 0) return "(none)";
+        StringBuilder sb = new StringBuilder();
+        int pos = 0;
+        int peerIdx = 0;
+        while (pos < blob.length) {
+            sb.append("\n  [Saved Peer ").append(peerIdx).append("]");
+            boolean hasIp = false;
+            boolean hasTcp = false;
+            
+            // 1. Try direct UDP IP (tcp_enabled = false in C code)
+            if (pos < blob.length) {
+                int fam = blob[pos] & 0xFF;
+                if (fam == 2) { // TOX_AF_INET
+                    if (pos + 7 <= blob.length) {
+                        sb.append("\n    UDP: ").append(blob[pos+1]&0xFF).append(".").append(blob[pos+2]&0xFF).append(".").append(blob[pos+3]&0xFF).append(".").append(blob[pos+4]&0xFF);
+                        int port = ((blob[pos+5]&0xFF) << 8) | (blob[pos+6]&0xFF);
+                        sb.append(":").append(port);
+                        pos += 7;
+                        hasIp = true;
+                    }
+                } else if (fam == 10) { // TOX_AF_INET6
+                    if (pos + 19 <= blob.length) {
+                        sb.append("\n    UDP: [").append(formatIPv6(blob, pos+1)).append("]");
+                        int port = ((blob[pos+17]&0xFF) << 8) | (blob[pos+18]&0xFF);
+                        sb.append(":").append(port);
+                        pos += 19;
+                        hasIp = true;
+                    }
+                }
+            }
+            
+            // 2. Try TCP Relay (tcp_enabled = true in C code)
+            if (pos < blob.length) {
+                int fam = blob[pos] & 0xFF;
+                if (fam == 2 || fam == 130) { // IPv4 or TOX_TCP_INET
+                    if (pos + 39 <= blob.length) {
+                        sb.append("\n    TCP: ").append(blob[pos+1]&0xFF).append(".").append(blob[pos+2]&0xFF).append(".").append(blob[pos+3]&0xFF).append(".").append(blob[pos+4]&0xFF);
+                        int port = ((blob[pos+5]&0xFF) << 8) | (blob[pos+6]&0xFF);
+                        sb.append(":").append(port);
+                        sb.append("\n      Relay PK: ").append(hex(Arrays.copyOfRange(blob, pos + 7, pos + 39)));
+                        pos += 39;
+                        hasTcp = true;
+                    }
+                } else if (fam == 10 || fam == 138) { // IPv6 or TOX_TCP_INET6
+                    if (pos + 51 <= blob.length) {
+                        sb.append("\n    TCP: [").append(formatIPv6(blob, pos+1)).append("]");
+                        int port = ((blob[pos+17]&0xFF) << 8) | (blob[pos+18]&0xFF);
+                        sb.append(":").append(port);
+                        sb.append("\n      Relay PK: ").append(hex(Arrays.copyOfRange(blob, pos + 19, pos + 51)));
+                        pos += 51;
+                        hasTcp = true;
+                    }
+                }
+            }
+            
+            if (!hasIp && !hasTcp) {
+                sb.append("\n    (Invalid/Truncated peer data)");
+                break;
+            }
+            
+            // 3. Read 32-byte Peer Public Key
+            if (pos + 32 <= blob.length) {
+                sb.append("\n    Peer PK: ").append(hex(Arrays.copyOfRange(blob, pos, pos + 32)));
+                pos += 32;
+            } else {
+                sb.append("\n    (Truncated PK)");
+                break;
+            }
+            peerIdx++;
         }
         return sb.toString();
     }
