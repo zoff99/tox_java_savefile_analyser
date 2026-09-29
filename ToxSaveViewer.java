@@ -20,6 +20,19 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 
 public class ToxSaveViewer extends JFrame {
 
+    // ============================================================
+    // Change this single value to make the entire UI larger or smaller.
+    //   1.0 = base size
+    //   1.8 = 80% larger (current default)
+    //   2.5 = 150% larger
+    //   0.8 = 20% smaller
+    // ============================================================
+    private static final float GLOBAL_SCALE = 1.8f;
+
+    private static int scale(int base) {
+        return Math.round(base * GLOBAL_SCALE);
+    }
+
     private List<Section> sections = new ArrayList<>();
     private byte[] fileData;
     private ChartPanel chartPanel;
@@ -29,32 +42,32 @@ public class ToxSaveViewer extends JFrame {
 
     public ToxSaveViewer() {
         setTitle("Tox Save File Viewer");
-        setSize(1200, 900);
+        setSize(scale(820), scale(640));
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(8)));
         JButton openBtn = new JButton("Open Tox Save File");
         fileLabel = new JLabel("No file loaded");
         topPanel.add(openBtn);
         topPanel.add(fileLabel);
 
         chartPanel = new ChartPanel();
-        legendPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        legendPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(8)));
 
         JPanel centerPanel = new JPanel(new BorderLayout());
-        centerPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        centerPanel.setBorder(BorderFactory.createEmptyBorder(scale(10), scale(10), scale(10), scale(10)));
         centerPanel.add(chartPanel, BorderLayout.CENTER);
         centerPanel.add(legendPanel, BorderLayout.SOUTH);
 
-        detailsArea = new JTextArea(15, 80);
+        detailsArea = new JTextArea(18, 100);
         detailsArea.setFont(UIManager.getFont("TextArea.font"));
         detailsArea.setEditable(false);
         JScrollPane scrollPane = new JScrollPane(detailsArea);
         scrollPane.setBorder(BorderFactory.createTitledBorder("Section Details (Hover or click a bar)"));
 
-        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
-        mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JPanel mainPanel = new JPanel(new BorderLayout(scale(10), scale(10)));
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(scale(10), scale(10), scale(10), scale(10)));
         mainPanel.add(topPanel, BorderLayout.NORTH);
         mainPanel.add(centerPanel, BorderLayout.CENTER);
         mainPanel.add(scrollPane, BorderLayout.SOUTH);
@@ -163,7 +176,7 @@ public class ToxSaveViewer extends JFrame {
             JPanel colorBox = new JPanel();
             colorBox.setBackground(t.color);
             colorBox.setBorder(BorderFactory.createLineBorder(Color.BLACK));
-            colorBox.setPreferredSize(new Dimension(16, 16));
+            colorBox.setPreferredSize(new Dimension(scale(16), scale(16)));
             legendPanel.add(colorBox);
             legendPanel.add(new JLabel(t.name));
         }
@@ -246,10 +259,11 @@ public class ToxSaveViewer extends JFrame {
     class ChartPanel extends JPanel {
         List<Section> sections;
         byte[] fileData;
+        private final int pad = scale(20);
 
         public ChartPanel() {
             setBackground(Color.LIGHT_GRAY);
-            setPreferredSize(new Dimension(1000, 300));
+            setPreferredSize(new Dimension(scale(700), scale(260)));
 
             MouseAdapter ma = new MouseAdapter() {
                 @Override
@@ -274,10 +288,9 @@ public class ToxSaveViewer extends JFrame {
         private void handleMouseMove(int mx, int my) {
             Section hovered = null;
             if (sections != null) {
-                int padding = 20;
-                int availableHeight = getHeight() - padding * 2;
+                int availableHeight = getHeight() - pad * 2;
                 for (Section s : sections) {
-                    if (mx >= s.x && mx < s.x + s.w && my >= padding && my < padding + availableHeight) {
+                    if (mx >= s.x && mx < s.x + s.w && my >= pad && my < pad + availableHeight) {
                         hovered = s;
                         break;
                     }
@@ -321,16 +334,15 @@ public class ToxSaveViewer extends JFrame {
             g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
-            int padding = 20;
-            int availableWidth = getWidth() - padding * 2;
-            int availableHeight = getHeight() - padding * 2;
+            int availableWidth = getWidth() - pad * 2;
+            int availableHeight = getHeight() - pad * 2;
 
             if (availableWidth <= 0 || availableHeight <= 0) return;
 
             double pixelScale = availableWidth / (double) fileData.length;
 
             for (Section s : sections) {
-                int x = padding + (int) (s.offset * pixelScale);
+                int x = pad + (int) (s.offset * pixelScale);
                 int w = (int) ((s.length + 8) * pixelScale);
                 if (w == 0 && (s.length + 8) > 0) w = 1;
 
@@ -338,15 +350,15 @@ public class ToxSaveViewer extends JFrame {
                 s.w = w;
 
                 g2d.setColor(s.color);
-                g2d.fillRect(x, padding, w, availableHeight);
+                g2d.fillRect(x, pad, w, availableHeight);
 
                 g2d.setColor(Color.BLACK);
-                g2d.drawRect(x, padding, w, availableHeight);
+                g2d.drawRect(x, pad, w, availableHeight);
 
                 FontMetrics fm = g2d.getFontMetrics();
                 if (w > fm.stringWidth(s.typeName) + 10) {
                     g2d.setColor(Color.BLACK);
-                    int textY = padding + (availableHeight + fm.getAscent() - fm.getDescent()) / 2;
+                    int textY = pad + (availableHeight + fm.getAscent() - fm.getDescent()) / 2;
                     g2d.drawString(s.typeName, x + 5, textY);
                 }
             }
@@ -358,15 +370,14 @@ public class ToxSaveViewer extends JFrame {
             try {
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
                 
-                // Dynamically scale UI elements for High DPI / OS Zoom settings
+                // Dynamically scale UI elements for High DPI / OS Zoom settings,
+                // then apply the user-adjustable GLOBAL_SCALE on top.
                 int screenRes = Toolkit.getDefaultToolkit().getScreenResolution();
-                float scale = Math.max(1.25f, screenRes / 96.0f); 
-                
-                Font defaultFont = new Font(Font.SANS_SERIF, Font.PLAIN, 14);
-                Font monoFont = new Font(Font.MONOSPACED, Font.PLAIN, 14);
-                
-                Font scaledDefault = defaultFont.deriveFont(defaultFont.getSize2D() * scale);
-                Font scaledMono = monoFont.deriveFont(monoFont.getSize2D() * scale);
+                float dpiScale = Math.max(1.0f, screenRes / 96.0f);
+                float fontScale = dpiScale * GLOBAL_SCALE;
+
+                Font scaledDefault = new Font(Font.SANS_SERIF, Font.PLAIN, 14).deriveFont(14f * fontScale);
+                Font scaledMono = new Font(Font.MONOSPACED, Font.PLAIN, 14).deriveFont(14f * fontScale);
                 
                 UIManager.put("Label.font", scaledDefault);
                 UIManager.put("Button.font", scaledDefault);
