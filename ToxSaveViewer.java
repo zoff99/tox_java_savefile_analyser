@@ -27,13 +27,8 @@ public class ToxSaveViewer extends JFrame {
 
     // ============================================================
     // Change this single value to make the entire UI larger or smaller.
-    //   1.0 = base size, 1.8 = 80% larger, 2.5 = 150% larger, 0.8 = smaller
     // ============================================================
     private static final float GLOBAL_SCALE = 1.8f;
-
-    // Compact heights for the two colour-bar strips (base units, scaled by GLOBAL_SCALE)
-    private static final int MAIN_CHART_HEIGHT = 56;
-    private static final int ZOOM_CHART_HEIGHT = 68;
 
     private static int scale(int base) {
         return Math.round(base * GLOBAL_SCALE);
@@ -62,6 +57,17 @@ public class ToxSaveViewer extends JFrame {
     private static final int OFF_NOSPAM = 2204;
     private static final int OFF_LASTSEEN = 2208;
 
+    // network.h family constants used in packed nodes (pack_ip_port)
+    private static final int FAM_IPV4 = 2;        // TOX_AF_INET
+    private static final int FAM_IPV6 = 10;       // TOX_AF_INET6
+    private static final int FAM_TCP_IPV4 = 130;  // TOX_TCP_INET
+    private static final int FAM_TCP_IPV6 = 138;  // TOX_TCP_INET6
+
+    // DHT.c state constants
+    private static final long DHT_STATE_COOKIE_GLOBAL = 0x159000dL;
+    private static final int DHT_STATE_COOKIE_TYPE = 0x11ce;
+    private static final int DHT_STATE_TYPE_NODES = 4;
+
     private List<Section> sections = new ArrayList<>();
     private byte[] fileData;
     private ChartPanel chartPanel;
@@ -85,9 +91,8 @@ public class ToxSaveViewer extends JFrame {
 
         chartPanel = new ChartPanel();
         zoomPanel = new ZoomPanel();
-        legendPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(2)));
+        legendPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(8)));
 
-        // Compact top region: buttons + two thin colour bars + legend
         JPanel northPanel = new JPanel();
         northPanel.setLayout(new BoxLayout(northPanel, BoxLayout.Y_AXIS));
         topPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -164,8 +169,14 @@ public class ToxSaveViewer extends JFrame {
             int type = readLE16(b, pos + 4);
             int cookie = readLE16(b, pos + 6);
 
-            if (cookie != 0x01ce) break;
-            if (lengthLong < 0 || pos + 8 + lengthLong > b.length) break;
+            if (cookie != 0x01ce) {
+                System.err.println("Warning: Invalid section cookie at offset " + pos);
+                break;
+            }
+            if (lengthLong < 0 || pos + 8 + lengthLong > b.length) {
+                System.err.println("Warning: Truncated or invalid section at offset " + pos);
+                break;
+            }
 
             int length = (int) lengthLong;
             Section s = new Section();
@@ -185,7 +196,15 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
+    // ------------------------------------------------------------------
+    //  Selection / linking between chart, zoom and legend
+    // ------------------------------------------------------------------
+
     private void selectSection(Section s) {
+        if (s == selectedSection) {
+            zoomPanel.setSection(s);
+            return;
+        }
         selectedSection = s;
         zoomPanel.setSection(s);
         if (s != null) {
@@ -210,6 +229,10 @@ public class ToxSaveViewer extends JFrame {
         return null;
     }
 
+    // ------------------------------------------------------------------
+    //  Sub-item construction (the coloured zoom blocks)
+    // ------------------------------------------------------------------
+
     private SubItem makeItem(int offsetInFile, int length, String label, Color color, String details) {
         SubItem it = new SubItem();
         it.offsetInFile = offsetInFile;
@@ -226,14 +249,14 @@ public class ToxSaveViewer extends JFrame {
         int base = s.offset + 8;
         switch (s.type) {
             case 1: buildNospamKeySubItems(s); break;
-            case 2: s.subItems.add(makeItem(base, d.length, "DHT state", s.color, describeDht(s))); break;
+            case 2: buildDhtSubItems(s); break;
             case 3: buildFriendSubItems(s); break;
             case 4: s.subItems.add(makeItem(base, d.length, "name", s.color, describeText(d, "Self name"))); break;
             case 5: s.subItems.add(makeItem(base, d.length, "status msg", s.color, describeText(d, "Status message"))); break;
             case 6: s.subItems.add(makeItem(base, d.length, "status", s.color, describeUserStatus(d))); break;
-            case 7: s.subItems.add(makeItem(base, d.length, "groups", s.color, describeGroups(s))); break;
-            case 10: buildNodeSubItems(s, "TCP relay"); break;
-            case 11: buildNodeSubItems(s, "Path node"); break;
+            case 7: buildGroupSubItems(s); break;
+            case 10: buildNodeSubItems(s, "TCP relay", false); break;
+            case 11: buildNodeSubItems(s, "Path node", false); break;
             case 20: s.subItems.add(makeItem(base, d.length, "conferences", s.color, describeConferences(s))); break;
             case 255: s.subItems.add(makeItem(base, 0, "end", Color.BLACK, "End-of-save marker (no payload)")); break;
             default: s.subItems.add(makeItem(base, d.length, "data", Color.WHITE, "(unknown section)")); break;
@@ -257,6 +280,96 @@ public class ToxSaveViewer extends JFrame {
                 "Secret key  <-- SENSITIVE:\n" + hex(sec)));
         } else {
             s.subItems.add(makeItem(base, d.length, "keys", s.color, "(unexpected size " + d.length + ")"));
+        }
+    }
+
+    private void buildDhtSubItems(Section s) {
+        byte[] d = s.data;
+        int base = s.offset + 8;
+        int pos = 0;
+
+        if (d.length >= 4 && readLE32(d, 0) == DHT_STATE_COOKIE_GLOBAL) {
+            pos = 4;
+            s.subItems.add(makeItem(base, 4, "DHT cookie", new Color(200, 200, 200),
+                "DHT_STATE_COOKIE_GLOBAL = 0x159000d\n(verifies this is a DHT state blob)"));
+        } else {
+            s.subItems.add(makeItem(base, d.length, "DHT data", s.color, describeDht(s)));
+            return;
+        }
+
+        while (pos + 8 <= d.length) {
+            long lenLong = readLE32(d, pos);
+            int type = readLE16(d, pos + 4);
+            int cookie = readLE16(d, pos + 6);
+            if (cookie != DHT_STATE_COOKIE_TYPE || lenLong < 0 || pos + 8 + lenLong > d.length) {
+                break;
+            }
+            int len = (int) lenLong;
+            if (type == DHT_STATE_TYPE_NODES) {
+                s.subItems.add(makeItem(base + pos, 8, "nodes header", new Color(160, 160, 160),
+                    "DHT sub-section header\ncookie=0x11ce, type=4 (NODES), length=" + len));
+                buildNodeSubItemsAt(s, d, pos + 8, len, base + pos + 8, "DHT node");
+            } else {
+                byte[] blob = Arrays.copyOfRange(d, pos + 8, pos + 8 + len);
+                s.subItems.add(makeItem(base + pos, 8 + len, "subsec#" + type, Color.GRAY,
+                    "Unknown DHT sub-section type " + type + " (" + len + " bytes)\n" + getHexDump(blob)));
+            }
+            pos += 8 + len;
+        }
+        if (pos < d.length) {
+            s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
+                "Trailing " + (d.length - pos) + " bytes not parsed"));
+        }
+    }
+
+    private void buildNodeSubItems(Section s, String label, boolean tcpEnabled) {
+        buildNodeSubItemsAt(s, s.data, 0, s.data.length, s.offset + 8, label);
+    }
+
+    /** Parses packed nodes (pack_nodes / unpack_nodes from DHT.c) starting at data[off]. */
+    private void buildNodeSubItemsAt(Section s, byte[] d, int off, int len, int fileBase, String label) {
+        int pos = off;
+        int end = Math.min(off + len, d.length);
+        int idx = 0;
+        while (pos < end) {
+            int family = d[pos] & 0xFF;
+            int nodeSize;
+            String famName;
+            if (family == FAM_IPV4) { nodeSize = 39; famName = "UDP IPv4"; }
+            else if (family == FAM_IPV6) { nodeSize = 51; famName = "UDP IPv6"; }
+            else if (family == FAM_TCP_IPV4) { nodeSize = 39; famName = "TCP IPv4"; }
+            else if (family == FAM_TCP_IPV6) { nodeSize = 51; famName = "TCP IPv6"; }
+            else break;
+
+            if (pos + nodeSize > end) break;
+
+            boolean v6 = (family == FAM_IPV6 || family == FAM_TCP_IPV6);
+            String ip;
+            int port;
+            byte[] key;
+            if (v6) {
+                ip = formatIpv6(Arrays.copyOfRange(d, pos + 1, pos + 17));
+                port = readBE16(d, pos + 17);
+                key = Arrays.copyOfRange(d, pos + 19, pos + 51);
+            } else {
+                ip = formatIpv4(Arrays.copyOfRange(d, pos + 1, pos + 5));
+                port = readBE16(d, pos + 5);
+                key = Arrays.copyOfRange(d, pos + 7, pos + 39);
+            }
+
+            StringBuilder det = new StringBuilder();
+            det.append(label).append(" #").append(idx).append("\n");
+            det.append("Address:    ").append(ip).append(":").append(port).append("\n");
+            det.append("Transport:  ").append(famName).append("  (family byte ").append(family).append(")\n");
+            det.append("Public key: ").append(hex(key)).append("\n");
+
+            s.subItems.add(makeItem(fileBase + pos, nodeSize, ip, PALETTE[idx % PALETTE.length], det.toString()));
+            pos += nodeSize;
+            idx++;
+        }
+        if (pos < end) {
+            s.subItems.add(makeItem(fileBase + pos, end - pos, "tail", Color.GRAY,
+                "Trailing " + (end - pos) + " bytes not parsed as nodes"));
         }
     }
 
@@ -306,40 +419,240 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    private void buildNodeSubItems(Section s, String label) {
+    /** GROUPS section: msgpack array of groups (gc_save_pack_group in group_pack.c). */
+    private void buildGroupSubItems(Section s) {
         byte[] d = s.data;
         int base = s.offset + 8;
         int pos = 0;
-        int idx = 0;
-        while (pos < d.length) {
-            int family = d[pos] & 0xFF;
-            if (family == 2 && pos + 39 <= d.length) {
-                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 5);
-                int port = readBE16(d, pos + 5);
-                byte[] key = Arrays.copyOfRange(d, pos + 7, pos + 39);
-                String ipstr = formatIpv4(ip);
-                s.subItems.add(makeItem(base + pos, 39, ipstr, PALETTE[idx % PALETTE.length],
-                    label + " #" + idx + "\nAddress:    " + ipstr + ":" + port +
-                    "\nFamily:     IPv4\nPublic key: " + hex(key)));
-                pos += 39; idx++;
-            } else if (isIpv6Family(family) && pos + 51 <= d.length) {
-                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 17);
-                int port = readBE16(d, pos + 17);
-                byte[] key = Arrays.copyOfRange(d, pos + 19, pos + 51);
-                String ipstr = formatIpv6(ip);
-                s.subItems.add(makeItem(base + pos, 51, ipstr, PALETTE[idx % PALETTE.length],
-                    label + " #" + idx + "\nAddress:    " + ipstr + ":" + port +
-                    "\nFamily:     IPv6\nPublic key: " + hex(key)));
-                pos += 51; idx++;
-            } else {
-                if (d.length - pos > 0) {
-                    s.subItems.add(makeItem(base + pos, d.length - pos, "other", Color.GRAY,
-                        "Unparsed trailing data (" + (d.length - pos) + " bytes)"));
-                }
+
+        int arr = msgpackReadArrayCount(d, pos);
+        if (arr == -1) {
+            s.subItems.add(makeItem(base, d.length, "groups", s.color, describeGroups(s)));
+            return;
+        }
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) pos = 0;
+
+        int count = arr & 0xFFFF;
+        for (int g = 0; g < count; g++) {
+            int groupStart = pos;
+            GroupInfo gi = parseOneGroup(d, pos);
+            if (gi == null) {
+                s.subItems.add(makeItem(base + groupStart, d.length - groupStart, "group?" , Color.GRAY,
+                    "Could not parse group #" + g + " (msgpack error)"));
                 break;
             }
+            int size = gi.endPos - groupStart;
+            String label = gi.name.isEmpty() ? ("group#" + g) : gi.name;
+            s.subItems.add(makeItem(base + groupStart, size, label, PALETTE[g % PALETTE.length], gi.details));
+            pos = gi.endPos;
+        }
+        if (pos < d.length) {
+            s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
+                "Trailing " + (d.length - pos) + " bytes"));
         }
     }
+
+    private static class GroupInfo {
+        int endPos;
+        String name = "";
+        String details = "";
+    }
+
+    /** Parses one group entry (array of 7 items) from group_pack.c. Returns null on error. */
+    private GroupInfo parseOneGroup(byte[] d, int pos) {
+        int arr = msgpackReadArrayCount(d, pos);
+        if (arr == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        if ((arr & 0xFFFF) != 7) {
+            // Not the expected layout; skip the whole value and report.
+            int after = msgpackSkipValue(d, pos);
+            if (after < 0) return null;
+            GroupInfo gi = new GroupInfo();
+            gi.endPos = after;
+            gi.details = "Group entry with unexpected item count: " + (arr & 0xFFFF) + " (expected 7)";
+            return gi;
+        }
+
+        GroupInfo gi = new GroupInfo();
+        StringBuilder det = new StringBuilder();
+
+        // [1] state values: array(8): disconnected, name_len, privacy, maxpeers, pwd_len, version, topic_lock, voice
+        int sv = msgpackReadArrayCount(d, pos);
+        if (sv == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        long[] vals = new long[8];
+        boolean valsOk = (sv & 0xFFFF) == 8;
+        for (int i = 0; i < 8 && valsOk; i++) {
+            long[] v = msgpackReadUint(d, pos);
+            if (v == null) { valsOk = false; break; }
+            vals[i] = v[0];
+            pos = (int) v[1];
+        }
+        if (!valsOk) return null;
+
+        boolean disconnected = vals[0] != 0;
+        int nameLen = (int) vals[1];
+        int privacy = (int) vals[2];
+        int maxPeers = (int) vals[3];
+        int pwdLen = (int) vals[4];
+        long version = vals[5];
+        long topicLock = vals[6];
+        int voice = (int) vals[7];
+
+        // [2] state binary: array(5): sig(64), founder_ext_pk(64), name, password, mod_list_hash(32)
+        int sb = msgpackReadArrayCount(d, pos);
+        if (sb == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        if ((sb & 0xFFFF) != 5) return null;
+
+        byte[] sig = msgpackReadBin(d, pos);       if (sig == null) return null;
+        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+        byte[] founderPk = msgpackReadBin(d, pos); if (founderPk == null) return null;
+        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+        byte[] nameBytes = msgpackReadBin(d, pos); if (nameBytes == null) return null;
+        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+        byte[] pwd = msgpackReadBin(d, pos);       if (pwd == null) return null;
+        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+        byte[] modHash = msgpackReadBin(d, pos);   if (modHash == null) return null;
+        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+
+        gi.name = trimNulls(new String(nameBytes, 0, Math.min(nameLen, nameBytes.length), StandardCharsets.UTF_8));
+
+        // [3] topic info: array(6): version, length, checksum, topic, sig_pk(32), sig(64)
+        int ti = msgpackReadArrayCount(d, pos);
+        if (ti == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        String topicStr = "";
+        long topicVersion = 0;
+        if ((ti & 0xFFFF) == 6) {
+            long[] tv = msgpackReadUint(d, pos);   if (tv == null) return null;
+            topicVersion = tv[0]; pos = (int) tv[1];
+            long[] tl = msgpackReadUint(d, pos);   if (tl == null) return null;
+            int topicLen = (int) tl[0]; pos = (int) tl[1];
+            long[] tc = msgpackReadUint(d, pos);   if (tc == null) return null;
+            pos = (int) tc[1];
+            byte[] topicBytes = msgpackReadBin(d, pos); if (topicBytes == null) return null;
+            pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+            topicStr = trimNulls(new String(topicBytes, 0, Math.min(topicLen, topicBytes.length), StandardCharsets.UTF_8));
+            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // topic sig pk
+            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // topic sig
+        } else {
+            pos = skipMsgpackArrayItems(d, pos, ti & 0xFFFF);
+            if (pos < 0) return null;
+        }
+
+        // [4] mod list: array(2): num_mods, packed list or nil
+        int ml = msgpackReadArrayCount(d, pos);
+        if (ml == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        int numMods = 0;
+        if ((ml & 0xFFFF) == 2) {
+            long[] nm = msgpackReadUint(d, pos);
+            if (nm == null) return null;
+            numMods = (int) nm[0];
+            pos = (int) nm[1];
+            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // mod list bin or nil
+        } else {
+            pos = skipMsgpackArrayItems(d, pos, ml & 0xFFFF);
+            if (pos < 0) return null;
+        }
+
+        // [5] keys: array(4): chat_pub(64), chat_sec(128), self_pub(64), self_sec(128)
+        int ks = msgpackReadArrayCount(d, pos);
+        if (ks == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        byte[] chatPub = null;
+        if ((ks & 0xFFFF) >= 1) {
+            chatPub = msgpackReadBin(d, pos);
+        }
+        pos = skipMsgpackArrayItems(d, pos, ks & 0xFFFF);
+        if (pos < 0) return null;
+
+        // [6] self info: array(4): nick_len, role, status, nick
+        int si = msgpackReadArrayCount(d, pos);
+        if (si == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        String selfNick = "";
+        int selfRole = 0;
+        int selfStatus = 0;
+        if ((si & 0xFFFF) == 4) {
+            long[] nl = msgpackReadUint(d, pos);   if (nl == null) return null;
+            int nickLen = (int) nl[0]; pos = (int) nl[1];
+            long[] rl = msgpackReadUint(d, pos);   if (rl == null) return null;
+            selfRole = (int) rl[0]; pos = (int) rl[1];
+            long[] st = msgpackReadUint(d, pos);   if (st == null) return null;
+            selfStatus = (int) st[0]; pos = (int) st[1];
+            byte[] nickBytes = msgpackReadBin(d, pos); if (nickBytes == null) return null;
+            pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+            selfNick = trimNulls(new String(nickBytes, 0, Math.min(nickLen, nickBytes.length), StandardCharsets.UTF_8));
+        } else {
+            pos = skipMsgpackArrayItems(d, pos, si & 0xFFFF);
+            if (pos < 0) return null;
+        }
+
+        // [7] saved peers: array(2): packed_size, peers bin or nil
+        int sp = msgpackReadArrayCount(d, pos);
+        if (sp == -1) return null;
+        pos = msgpackSkipValue(d, pos);
+        if (pos < 0) return null;
+        int savedPeerBytes = 0;
+        if ((sp & 0xFFFF) == 2) {
+            long[] ps = msgpackReadUint(d, pos);
+            if (ps == null) return null;
+            savedPeerBytes = (int) ps[0];
+            pos = (int) ps[1];
+            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // peers bin or nil
+        } else {
+            pos = skipMsgpackArrayItems(d, pos, sp & 0xFFFF);
+            if (pos < 0) return null;
+        }
+
+        gi.endPos = pos;
+
+        det.append("Group: \"").append(gi.name).append("\"\n");
+        det.append("State:           ").append(disconnected ? "DISCONNECTED (left/disabled)" : "CONNECTING/CONNECTED").append("\n");
+        det.append("Privacy:         ").append(privacy == 0 ? "PUBLIC" : "PRIVATE").append("\n");
+        det.append("Voice:           ").append(voiceName(voice)).append("\n");
+        det.append("Topic lock:      ").append(topicLock == 0 ? "ENABLED (mods only)" : "DISABLED").append("\n");
+        det.append("Max peers:       ").append(maxPeers).append("\n");
+        det.append("State version:   ").append(version).append("\n");
+        det.append("Password:        ").append(pwdLen > 0 ? "set (" + pwdLen + " bytes)" : "none").append("\n");
+        det.append("Topic:           ").append(topicStr.isEmpty() ? "(empty)" : "\"" + topicStr + "\"").append("\n");
+        det.append("Topic version:   ").append(topicVersion).append("\n");
+        det.append("Moderators:      ").append(numMods).append("\n");
+        if (chatPub != null && chatPub.length >= 32) {
+            det.append("Chat ID:         ").append(hex(Arrays.copyOfRange(chatPub, 32, 64))).append("\n");
+        }
+        det.append("Self nick:       ").append(selfNick.isEmpty() ? "(empty)" : "\"" + selfNick + "\"").append("\n");
+        det.append("Self role:       ").append(roleName(selfRole)).append("\n");
+        det.append("Self status:     ").append(userStatusName(selfStatus)).append("\n");
+        det.append("Saved peer data: ").append(savedPeerBytes).append(" bytes\n");
+        if (founderPk.length >= 64) {
+            det.append("Founder enc pk:  ").append(hex(Arrays.copyOfRange(founderPk, 0, 32))).append("\n");
+        }
+        gi.details = det.toString();
+        return gi;
+    }
+
+    private int skipMsgpackArrayItems(byte[] d, int pos, int count) {
+        for (int i = 0; i < count; i++) {
+            pos = msgpackSkipValue(d, pos);
+            if (pos < 0) return -1;
+        }
+        return pos;
+    }
+
+    // ------------------------------------------------------------------
+    //  Text descriptions per section
+    // ------------------------------------------------------------------
 
     private String buildDetails(Section s) {
         StringBuilder info = new StringBuilder();
@@ -392,9 +705,33 @@ public class ToxSaveViewer extends JFrame {
     }
 
     private String describeDht(Section s) {
-        return "DHT state (" + s.length + " bytes).\n" +
-               "Saved DHT routing data: close nodes and DHT friend entries used to\n" +
-               "reconnect to the network quickly. Binary structure; see hex dump.";
+        byte[] d = s.data;
+        StringBuilder sb = new StringBuilder();
+        int pos = 0;
+        if (d.length >= 4 && readLE32(d, 0) == DHT_STATE_COOKIE_GLOBAL) {
+            sb.append("DHT_STATE_COOKIE_GLOBAL: 0x159000d  OK\n\n");
+            pos = 4;
+        } else {
+            return "DHT state (" + d.length + " bytes) - unexpected format (missing cookie).\nSee hex dump.";
+        }
+        while (pos + 8 <= d.length) {
+            long lenLong = readLE32(d, pos);
+            int type = readLE16(d, pos + 4);
+            int cookie = readLE16(d, pos + 6);
+            if (cookie != DHT_STATE_COOKIE_TYPE || lenLong < 0 || pos + 8 + lenLong > d.length) {
+                sb.append("(malformed DHT sub-section at offset ").append(pos).append(")\n");
+                break;
+            }
+            int len = (int) lenLong;
+            if (type == DHT_STATE_TYPE_NODES) {
+                sb.append("NODES sub-section: ").append(len).append(" bytes\n");
+                sb.append(describeNodesIn(d, pos + 8, len, "saved DHT node"));
+            } else {
+                sb.append("Unknown DHT sub-section type ").append(type).append(" (").append(len).append(" bytes)\n");
+            }
+            pos += 8 + len;
+        }
+        return sb.toString();
     }
 
     private String describeFriends(Section s) {
@@ -433,25 +770,31 @@ public class ToxSaveViewer extends JFrame {
 
     private String describeGroups(Section s) {
         byte[] d = s.data;
-        StringBuilder sb = new StringBuilder();
-        sb.append("Group chats (NGC), msgpack-encoded (" + d.length + " bytes).\n");
-        if (d.length > 0) {
-            int b0 = d[0] & 0xFF;
-            if (b0 >= 0x90 && b0 <= 0x9f) {
-                sb.append("Best effort: msgpack array with " + (b0 & 0x0f) + " group(s).\n");
-            } else if (b0 == 0xdc && d.length >= 3) {
-                sb.append("Best effort: msgpack array with " + readBE16(d, 1) + " group(s).\n");
-            } else {
-                sb.append("(First byte 0x" + String.format("%02X", b0) + "; could not detect array header.)\n");
-            }
+        int pos = 0;
+        int arr = msgpackReadArrayCount(d, pos);
+        if (arr == -1) {
+            return "Groups data (" + d.length + " bytes): could not read msgpack array header.\nSee hex dump.";
         }
-        sb.append("See raw hex dump below.");
+        pos = msgpackSkipValue(d, pos);
+        int count = arr & 0xFFFF;
+        StringBuilder sb = new StringBuilder();
+        sb.append(count).append(" saved group chat(s)  (msgpack encoded)\n\n");
+        for (int g = 0; g < count; g++) {
+            GroupInfo gi = parseOneGroup(d, pos);
+            if (gi == null) {
+                sb.append("[group ").append(g).append("]: failed to parse (msgpack error)\n");
+                break;
+            }
+            sb.append("########## Group ").append(g).append(" ##########\n");
+            sb.append(gi.details).append("\n");
+            pos = gi.endPos;
+        }
         return sb.toString();
     }
 
     private String describeConferences(Section s) {
         return "Conferences (classic audio/text) (" + s.length + " bytes).\n" +
-               "Saved conference state. See raw hex dump below.";
+               "Saved conference state (conference.c format). See raw hex dump below.";
     }
 
     private String describeNospamKeys(byte[] d) {
@@ -470,31 +813,57 @@ public class ToxSaveViewer extends JFrame {
     }
 
     private String describeNodeList(byte[] d, String label) {
-        int pos = 0;
+        return describeNodesIn(d, 0, d.length, label);
+    }
+
+    /** Lists packed nodes (unpack_nodes from DHT.c) in data[start..start+len). */
+    private String describeNodesIn(byte[] d, int start, int len, String label) {
+        int pos = start;
+        int end = Math.min(start + len, d.length);
         int count = 0;
         StringBuilder sb = new StringBuilder();
-        while (pos < d.length) {
+        while (pos < end) {
             int family = d[pos] & 0xFF;
-            if (family == 2 && pos + 39 <= d.length) {
-                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 5);
-                int port = readBE16(d, pos + 5);
-                byte[] key = Arrays.copyOfRange(d, pos + 7, pos + 39);
-                sb.append("  [").append(count).append("] ").append(formatIpv4(ip)).append(":").append(port)
-                  .append("   key=").append(hex(key)).append("\n");
-                pos += 39; count++;
-            } else if (isIpv6Family(family) && pos + 51 <= d.length) {
-                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 17);
-                int port = readBE16(d, pos + 17);
-                byte[] key = Arrays.copyOfRange(d, pos + 19, pos + 51);
-                sb.append("  [").append(count).append("] ").append(formatIpv6(ip)).append(":").append(port)
-                  .append("   key=").append(hex(key)).append("\n");
-                pos += 51; count++;
-            } else {
+            int nodeSize;
+            String famName;
+            if (family == FAM_IPV4) { nodeSize = 39; famName = "UDP IPv4"; }
+            else if (family == FAM_IPV6) { nodeSize = 51; famName = "UDP IPv6"; }
+            else if (family == FAM_TCP_IPV4) { nodeSize = 39; famName = "TCP IPv4"; }
+            else if (family == FAM_TCP_IPV6) { nodeSize = 51; famName = "TCP IPv6"; }
+            else {
+                sb.append("  (unknown family byte 0x").append(String.format("%02X", family))
+                  .append(" at offset ").append(pos).append(", stopping)\n");
                 break;
             }
+            if (pos + nodeSize > end) {
+                sb.append("  (truncated node at offset ").append(pos).append(")\n");
+                break;
+            }
+            boolean v6 = (family == FAM_IPV6 || family == FAM_TCP_IPV6);
+            String ip;
+            int port;
+            byte[] key;
+            if (v6) {
+                ip = formatIpv6(Arrays.copyOfRange(d, pos + 1, pos + 17));
+                port = readBE16(d, pos + 17);
+                key = Arrays.copyOfRange(d, pos + 19, pos + 51);
+            } else {
+                ip = formatIpv4(Arrays.copyOfRange(d, pos + 1, pos + 5));
+                port = readBE16(d, pos + 5);
+                key = Arrays.copyOfRange(d, pos + 7, pos + 39);
+            }
+            sb.append("  [").append(count).append("] ").append(ip).append(":").append(port)
+              .append("   (").append(famName).append(")\n");
+            sb.append("       key=").append(hex(key)).append("\n");
+            pos += nodeSize;
+            count++;
         }
         return count + " " + label + "(s)\n" + sb.toString();
     }
+
+    // ------------------------------------------------------------------
+    //  Tox ID + low level helpers
+    // ------------------------------------------------------------------
 
     private String computeToxId(byte[] pub, byte[] nospamBytes) {
         byte[] id = new byte[38];
@@ -523,6 +892,25 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
+    private String roleName(int role) {
+        switch (role) {
+            case 0: return "FOUNDER";
+            case 1: return "MODERATOR";
+            case 2: return "USER";
+            case 3: return "OBSERVER";
+            default: return "Unknown(" + role + ")";
+        }
+    }
+
+    private String voiceName(int v) {
+        switch (v) {
+            case 0: return "ALL can speak";
+            case 1: return "MODS+FOUNDER can speak";
+            case 2: return "FOUNDER only can speak";
+            default: return "Unknown(" + v + ")";
+        }
+    }
+
     private String formatTime(long unixSeconds) {
         if (unixSeconds <= 0) return "(never)";
         try {
@@ -534,7 +922,7 @@ public class ToxSaveViewer extends JFrame {
     }
 
     private boolean isIpv6Family(int family) {
-        return family == 10 || family == 23 || family == 28 || family == 30;
+        return family == FAM_IPV6 || family == FAM_TCP_IPV6;
     }
 
     private String formatIpv4(byte[] ip) {
@@ -580,61 +968,136 @@ public class ToxSaveViewer extends JFrame {
         return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
     }
 
+    private long readBE32(byte[] b, int off) {
+        return ((b[off] & 0xFFL) << 24) | ((b[off + 1] & 0xFFL) << 16) | ((b[off + 2] & 0xFFL) << 8) | (b[off + 3] & 0xFFL);
+    }
+
     private long readBE64(byte[] b, int off) {
         long v = 0;
         for (int i = 0; i < 8; i++) v = (v << 8) | (b[off + i] & 0xFF);
         return v;
     }
 
-    private void updateLegend() {
-        legendPanel.removeAll();
-        legendPanel.add(new JLabel("Legend:"));
-        Cursor hand = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR);
+    // ------------------------------------------------------------------
+    //  Minimal msgpack reader (matches bin_unpack usage in group_pack.c)
+    // ------------------------------------------------------------------
 
-        for (SectionType t : SectionType.values()) {
-            if (t == SectionType.UNKNOWN) continue;
-            boolean used = false;
-            for (Section s : sections) if (s.type == t.id) { used = true; break; }
-            if (!used) continue;
-
-            JPanel item = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(4), 0));
-            item.setOpaque(false);
-            item.setCursor(hand);
-
-            JPanel colorBox = new JPanel();
-            colorBox.setBackground(t.color);
-            colorBox.setBorder(BorderFactory.createLineBorder(Color.BLACK));
-            colorBox.setPreferredSize(new Dimension(scale(16), scale(16)));
-            colorBox.setCursor(hand);
-
-            JLabel label = new JLabel(t.name);
-            label.setCursor(hand);
-
-            item.add(colorBox);
-            item.add(label);
-
-            final SectionType st = t;
-            MouseAdapter ma = new MouseAdapter() {
-                @Override
-                public void mouseEntered(MouseEvent e) {
-                    Section s = findFirstSectionOfType(st.id);
-                    if (s != null) selectSection(s);
-                }
-                @Override
-                public void mouseClicked(MouseEvent e) {
-                    Section s = findFirstSectionOfType(st.id);
-                    if (s != null) selectSection(s);
-                }
-            };
-            item.addMouseListener(ma);
-            colorBox.addMouseListener(ma);
-            label.addMouseListener(ma);
-
-            legendPanel.add(item);
+    /** Returns array count if data[pos] is a msgpack array header, else -1. */
+    private int msgpackReadArrayCount(byte[] d, int pos) {
+        if (pos < 0 || pos >= d.length) return -1;
+        int b = d[pos] & 0xFF;
+        if (b >= 0x90 && b <= 0x9f) return b & 0x0f;
+        if (b == 0xdc) {
+            if (pos + 3 > d.length) return -1;
+            return readBE16(d, pos + 1);
         }
-        legendPanel.revalidate();
-        legendPanel.repaint();
+        if (b == 0xdd) {
+            if (pos + 5 > d.length) return -1;
+            long c = readBE32(d, pos + 1);
+            return (c > 0xFFFF) ? -1 : (int) c;
+        }
+        return -1;
     }
+
+    /** Reads an unsigned int; returns {value, newPos} or null on error. */
+    private long[] msgpackReadUint(byte[] d, int pos) {
+        if (pos < 0 || pos >= d.length) return null;
+        int b = d[pos] & 0xFF;
+        if (b <= 0x7f) return new long[]{b, pos + 1};
+        if (b == 0xcc) {
+            if (pos + 2 > d.length) return null;
+            return new long[]{d[pos + 1] & 0xFFL, pos + 2};
+        }
+        if (b == 0xcd) {
+            if (pos + 3 > d.length) return null;
+            return new long[]{readBE16(d, pos + 1), pos + 3};
+        }
+        if (b == 0xce) {
+            if (pos + 5 > d.length) return null;
+            return new long[]{readBE32(d, pos + 1), pos + 5};
+        }
+        if (b == 0xcf) {
+            if (pos + 9 > d.length) return null;
+            return new long[]{readBE64(d, pos + 1), pos + 9};
+        }
+        return null;
+    }
+
+    /** Reads a bin payload; returns the bytes or null on error. */
+    private byte[] msgpackReadBin(byte[] d, int pos) {
+        if (pos < 0 || pos >= d.length) return null;
+        int b = d[pos] & 0xFF;
+        int len;
+        int hdr;
+        if (b == 0xc4) { hdr = 2; if (pos + hdr > d.length) return null; len = d[pos + 1] & 0xFF; }
+        else if (b == 0xc5) { hdr = 3; if (pos + hdr > d.length) return null; len = readBE16(d, pos + 1); }
+        else if (b == 0xc6) { hdr = 5; if (pos + hdr > d.length) return null; len = (int) readBE32(d, pos + 1); }
+        else return null;
+        if (len < 0 || pos + hdr + len > d.length) return null;
+        return Arrays.copyOfRange(d, pos + hdr, pos + hdr + len);
+    }
+
+    /** Skips one msgpack value at pos; returns new position or -1 on error. */
+    private int msgpackSkipValue(byte[] d, int pos) {
+        if (pos < 0 || pos >= d.length) return -1;
+        int b = d[pos] & 0xFF;
+        if (b <= 0x7f) return pos + 1;                    // positive fixint
+        if (b >= 0x90 && b <= 0x9f) return skipMsgpackArrayItems(d, pos + 1, b & 0x0f);
+        if (b >= 0xa0 && b <= 0xbf) {                     // fixstr
+            int len = b & 0x1f;
+            return (pos + 1 + len <= d.length) ? pos + 1 + len : -1;
+        }
+        if (b >= 0xe0) return pos + 1;                    // negative fixint
+        switch (b) {
+            case 0xc0: return pos + 1;                    // nil
+            case 0xc2: case 0xc3: return pos + 1;         // false / true
+            case 0xc4: { int l = (pos + 2 <= d.length) ? d[pos + 1] & 0xFF : -1;
+                         return (l >= 0 && pos + 2 + l <= d.length) ? pos + 2 + l : -1; }
+            case 0xc5: { if (pos + 3 > d.length) return -1; int l = readBE16(d, pos + 1);
+                         return (pos + 3 + l <= d.length) ? pos + 3 + l : -1; }
+            case 0xc6: { if (pos + 5 > d.length) return -1; int l = (int) readBE32(d, pos + 1);
+                         return (l >= 0 && pos + 5 + l <= d.length) ? pos + 5 + l : -1; }
+            case 0xc7: { if (pos + 2 > d.length) return -1; int l = d[pos + 1] & 0xFF;
+                         return (pos + 3 + l <= d.length) ? pos + 3 + l : -1; }
+            case 0xc8: { if (pos + 3 > d.length) return -1; int l = readBE16(d, pos + 1);
+                         return (pos + 4 + l <= d.length) ? pos + 4 + l : -1; }
+            case 0xc9: { if (pos + 5 > d.length) return -1; int l = (int) readBE32(d, pos + 1);
+                         return (l >= 0 && pos + 6 + l <= d.length) ? pos + 6 + l : -1; }
+            case 0xca: case 0xcc: return pos + 5 <= d.length ? pos + 5 : -1;   // float32, uint8
+            case 0xcb: case 0xcd: return pos + 9 <= d.length ? pos + 9 : -1;   // float64, uint16
+            case 0xce: return pos + 5 <= d.length ? pos + 5 : -1;              // uint32
+            case 0xcf: return pos + 9 <= d.length ? pos + 9 : -1;              // uint64
+            case 0xd0: return pos + 2 <= d.length ? pos + 2 : -1;              // int8
+            case 0xd1: return pos + 3 <= d.length ? pos + 3 : -1;              // int16
+            case 0xd2: return pos + 5 <= d.length ? pos + 5 : -1;              // int32
+            case 0xd3: return pos + 9 <= d.length ? pos + 9 : -1;              // int64
+            case 0xd9: { if (pos + 2 > d.length) return -1; int l = d[pos + 1] & 0xFF;
+                         return (pos + 2 + l <= d.length) ? pos + 2 + l : -1; }
+            case 0xda: { if (pos + 3 > d.length) return -1; int l = readBE16(d, pos + 1);
+                         return (pos + 3 + l <= d.length) ? pos + 3 + l : -1; }
+            case 0xdb: { if (pos + 5 > d.length) return -1; int l = (int) readBE32(d, pos + 1);
+                         return (l >= 0 && pos + 5 + l <= d.length) ? pos + 5 + l : -1; }
+            case 0xdc: { if (pos + 3 > d.length) return -1; return skipMsgpackArrayItems(d, pos + 3, readBE16(d, pos + 1)); }
+            case 0xdd: { if (pos + 5 > d.length) return -1; return skipMsgpackArrayItems(d, pos + 5, (int) readBE32(d, pos + 1)); }
+            case 0xde: { if (pos + 3 > d.length) return -1; return skipMsgpackMapEntries(d, pos + 3, readBE16(d, pos + 1)); }
+            case 0xdf: { if (pos + 5 > d.length) return -1; return skipMsgpackMapEntries(d, pos + 5, (int) readBE32(d, pos + 1)); }
+            default:   return -1;
+        }
+    }
+
+    private int skipMsgpackMapEntries(byte[] d, int pos, int count) {
+        for (int i = 0; i < count; i++) {
+            pos = msgpackSkipValue(d, pos);
+            if (pos < 0) return -1;
+            pos = msgpackSkipValue(d, pos);
+            if (pos < 0) return -1;
+        }
+        return pos;
+    }
+
+    // ------------------------------------------------------------------
+    //  Hex dump
+    // ------------------------------------------------------------------
 
     private String getHexDump(byte[] data) {
         if (data == null || data.length == 0) return "(empty)\n";
@@ -660,6 +1123,10 @@ public class ToxSaveViewer extends JFrame {
         }
         return sb.toString();
     }
+
+    // ------------------------------------------------------------------
+    //  Model classes
+    // ------------------------------------------------------------------
 
     class Section {
         int offset;
@@ -711,6 +1178,10 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
+    // ------------------------------------------------------------------
+    //  Top chart: one bar per section
+    // ------------------------------------------------------------------
+
     class ChartPanel extends JPanel {
         List<Section> sections;
         byte[] fileData;
@@ -720,9 +1191,10 @@ public class ToxSaveViewer extends JFrame {
 
         public ChartPanel() {
             setBackground(Color.LIGHT_GRAY);
-            int h = scale(MAIN_CHART_HEIGHT);
+            int h = scale(56);
             setPreferredSize(new Dimension(scale(700), h));
             setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
+
             MouseAdapter ma = new MouseAdapter() {
                 @Override
                 public void mouseMoved(MouseEvent e) { handleMouseMove(e.getX(), e.getY()); }
@@ -817,6 +1289,10 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
+    // ------------------------------------------------------------------
+    //  Zoom chart: sub-blocks of the selected section
+    // ------------------------------------------------------------------
+
     class ZoomPanel extends JPanel {
         Section section;
         List<SubItem> items;
@@ -824,9 +1300,10 @@ public class ToxSaveViewer extends JFrame {
 
         public ZoomPanel() {
             setBackground(new Color(245, 245, 245));
-            int h = scale(ZOOM_CHART_HEIGHT);
+            int h = scale(68);
             setPreferredSize(new Dimension(scale(700), h));
             setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
+
             MouseAdapter ma = new MouseAdapter() {
                 @Override
                 public void mouseMoved(MouseEvent e) { handleZoomMouse(e.getX(), e.getY()); }
@@ -949,6 +1426,56 @@ public class ToxSaveViewer extends JFrame {
                 x += w;
             }
         }
+    }
+
+    private void updateLegend() {
+        legendPanel.removeAll();
+        legendPanel.add(new JLabel("Legend:"));
+        Cursor hand = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR);
+
+        for (SectionType t : SectionType.values()) {
+            if (t == SectionType.UNKNOWN) continue;
+            boolean used = false;
+            for (Section s : sections) if (s.type == t.id) { used = true; break; }
+            if (!used) continue;
+
+            JPanel item = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(4), 0));
+            item.setOpaque(false);
+            item.setCursor(hand);
+
+            JPanel colorBox = new JPanel();
+            colorBox.setBackground(t.color);
+            colorBox.setBorder(BorderFactory.createLineBorder(Color.BLACK));
+            colorBox.setPreferredSize(new Dimension(scale(16), scale(16)));
+            colorBox.setCursor(hand);
+
+            JLabel label = new JLabel(t.name);
+            label.setCursor(hand);
+
+            item.add(colorBox);
+            item.add(label);
+
+            final SectionType st = t;
+            MouseAdapter ma = new MouseAdapter() {
+                @Override
+                public void mouseEntered(MouseEvent e) {
+                    Section s = findFirstSectionOfType(st.id);
+                    if (s != null) selectSection(s);
+                }
+                @Override
+                public void mouseClicked(MouseEvent e) {
+                    Section s = findFirstSectionOfType(st.id);
+                    if (s != null) selectSection(s);
+                }
+            };
+            item.addMouseListener(ma);
+            colorBox.addMouseListener(ma);
+            label.addMouseListener(ma);
+
+            legendPanel.add(item);
+        }
+        legendPanel.revalidate();
+        legendPanel.repaint();
     }
 
     public static void main(String[] args) {
