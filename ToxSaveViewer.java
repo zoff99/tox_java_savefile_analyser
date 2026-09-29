@@ -458,11 +458,11 @@ public class ToxSaveViewer extends JFrame {
 
             // [2] state binary: array(5)
             if (!mp.readArraySizeFixed(5)) return null;
-            byte[] sig = mp.readBinFixed(64);
-            byte[] founderPk = mp.readBinFixed(64);
+            byte[] sig = mp.readBinFixed(64);               // SIGNATURE_SIZE (64)
+            byte[] founderPk = mp.readBinFixed(64);         // EXT_PUBLIC_KEY_SIZE (64)
             byte[] nameBytes = mp.readBinFixed(nameLen);
             byte[] pwd = mp.readBinFixed(pwdLen);
-            byte[] modHash = mp.readBinFixed(32);
+            byte[] modHash = mp.readBinFixed(32);           // MOD_MODERATION_HASH_SIZE (32)
 
             gi.name = new String(nameBytes, StandardCharsets.UTF_8);
 
@@ -472,8 +472,8 @@ public class ToxSaveViewer extends JFrame {
             int topicLen = (int) mp.readUint();
             long topicChecksum = mp.readUint();
             byte[] topicBytes = mp.readBinFixed(topicLen);
-            byte[] topicSigPk = mp.readBinFixed(32);
-            byte[] topicSig = mp.readBinFixed(64);
+            byte[] topicSigPk = mp.readBinFixed(32);        // SIG_PUBLIC_KEY_SIZE (32)
+            byte[] topicSig = mp.readBinFixed(64);          // SIGNATURE_SIZE (64)
 
             String topicStr = new String(topicBytes, StandardCharsets.UTF_8);
 
@@ -483,15 +483,15 @@ public class ToxSaveViewer extends JFrame {
             if (numMods == 0) {
                 mp.readNil();
             } else {
-                mp.readBinFixed(numMods * 32); // skip mod list
+                mp.readBinFixed(numMods * 32);              // MOD_LIST_ENTRY_SIZE is 32
             }
 
             // [5] keys: array(4)
             if (!mp.readArraySizeFixed(4)) return null;
-            byte[] chatPub = mp.readBinFixed(64);
-            byte[] chatSec = mp.readBinFixed(64);
-            byte[] selfPub = mp.readBinFixed(64);
-            byte[] selfSec = mp.readBinFixed(64);
+            byte[] chatPub = mp.readBinFixed(64);           // EXT_PUBLIC_KEY_SIZE (64)
+            byte[] chatSec = mp.readBinFixed(96);           // EXT_SECRET_KEY_SIZE (96 = 32 enc + 64 sig) <--- FIXED
+            byte[] selfPub = mp.readBinFixed(64);           // EXT_PUBLIC_KEY_SIZE (64)
+            byte[] selfSec = mp.readBinFixed(96);           // EXT_SECRET_KEY_SIZE (96) <--- FIXED
 
             // [6] self info: array(4)
             if (!mp.readArraySizeFixed(4)) return null;
@@ -521,7 +521,8 @@ public class ToxSaveViewer extends JFrame {
             det.append("Topic:           ").append(topicStr.isEmpty() ? "(empty)" : "\"" + topicStr + "\"").append("\n");
             det.append("Topic version:   ").append(topicVersion).append("\n");
             det.append("Moderators:      ").append(numMods).append("\n");
-            det.append("Chat ID:         ").append(hex(Arrays.copyOfRange(chatPub, 32, 64))).append("\n");
+            // Chat ID is the first 32 bytes of the extended public key
+            det.append("Chat ID:         ").append(hex(Arrays.copyOfRange(chatPub, 0, 32))).append("\n");
             det.append("Self nick:       ").append(selfNick.isEmpty() ? "(empty)" : "\"" + selfNick + "\"").append("\n");
             det.append("Self role:       ").append(roleName(selfRole)).append("\n");
             det.append("Self status:     ").append(userStatusName(selfStatus)).append("\n");
@@ -530,7 +531,8 @@ public class ToxSaveViewer extends JFrame {
             gi.details = det.toString();
             return gi;
         } catch (Exception e) {
-            return null;
+            // Throw exact error position if it fails again
+            throw new RuntimeException("MsgPack parse error at pos " + mp.getPosition() + ": " + e.getMessage(), e);
         }
     }
 
