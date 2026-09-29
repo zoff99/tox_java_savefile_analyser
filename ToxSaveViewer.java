@@ -25,10 +25,9 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 
 public class ToxSaveViewer extends JFrame {
 
-    // ============================================================
-    // Change this single value to make the entire UI larger or smaller.
-    // ============================================================
     private static final float GLOBAL_SCALE = 1.8f;
+    private static final int MAIN_CHART_HEIGHT = 56;
+    private static final int ZOOM_CHART_HEIGHT = 68;
 
     private static int scale(int base) {
         return Math.round(base * GLOBAL_SCALE);
@@ -43,7 +42,6 @@ public class ToxSaveViewer extends JFrame {
         new Color(255, 250, 200)
     };
 
-    // Saved_Friend layout from Messenger.c (friend_size() == 2216 bytes)
     private static final int FRIEND_SIZE = 2216;
     private static final int OFF_STATUS = 0;
     private static final int OFF_REAL_PK = 1;
@@ -57,13 +55,11 @@ public class ToxSaveViewer extends JFrame {
     private static final int OFF_NOSPAM = 2204;
     private static final int OFF_LASTSEEN = 2208;
 
-    // network.h family constants used in packed nodes (pack_ip_port)
-    private static final int FAM_IPV4 = 2;        // TOX_AF_INET
-    private static final int FAM_IPV6 = 10;       // TOX_AF_INET6
-    private static final int FAM_TCP_IPV4 = 130;  // TOX_TCP_INET
-    private static final int FAM_TCP_IPV6 = 138;  // TOX_TCP_INET6
+    private static final int FAM_IPV4 = 2;
+    private static final int FAM_IPV6 = 10;
+    private static final int FAM_TCP_IPV4 = 130;
+    private static final int FAM_TCP_IPV6 = 138;
 
-    // DHT.c state constants
     private static final long DHT_STATE_COOKIE_GLOBAL = 0x159000dL;
     private static final int DHT_STATE_COOKIE_TYPE = 0x11ce;
     private static final int DHT_STATE_TYPE_NODES = 4;
@@ -169,14 +165,8 @@ public class ToxSaveViewer extends JFrame {
             int type = readLE16(b, pos + 4);
             int cookie = readLE16(b, pos + 6);
 
-            if (cookie != 0x01ce) {
-                System.err.println("Warning: Invalid section cookie at offset " + pos);
-                break;
-            }
-            if (lengthLong < 0 || pos + 8 + lengthLong > b.length) {
-                System.err.println("Warning: Truncated or invalid section at offset " + pos);
-                break;
-            }
+            if (cookie != 0x01ce) break;
+            if (lengthLong < 0 || pos + 8 + lengthLong > b.length) break;
 
             int length = (int) lengthLong;
             Section s = new Section();
@@ -195,10 +185,6 @@ public class ToxSaveViewer extends JFrame {
             pos += 8 + length;
         }
     }
-
-    // ------------------------------------------------------------------
-    //  Selection / linking between chart, zoom and legend
-    // ------------------------------------------------------------------
 
     private void selectSection(Section s) {
         if (s == selectedSection) {
@@ -228,10 +214,6 @@ public class ToxSaveViewer extends JFrame {
         for (Section s : sections) if (s.type == type) return s;
         return null;
     }
-
-    // ------------------------------------------------------------------
-    //  Sub-item construction (the coloured zoom blocks)
-    // ------------------------------------------------------------------
 
     private SubItem makeItem(int offsetInFile, int length, String label, Color color, String details) {
         SubItem it = new SubItem();
@@ -326,7 +308,6 @@ public class ToxSaveViewer extends JFrame {
         buildNodeSubItemsAt(s, s.data, 0, s.data.length, s.offset + 8, label);
     }
 
-    /** Parses packed nodes (pack_nodes / unpack_nodes from DHT.c) starting at data[off]. */
     private void buildNodeSubItemsAt(Section s, byte[] d, int off, int len, int fileBase, String label) {
         int pos = off;
         int end = Math.min(off + len, d.length);
@@ -423,236 +404,135 @@ public class ToxSaveViewer extends JFrame {
     private void buildGroupSubItems(Section s) {
         byte[] d = s.data;
         int base = s.offset + 8;
-        int pos = 0;
 
-        int arr = msgpackReadArrayCount(d, pos);
-        if (arr == -1) {
-            s.subItems.add(makeItem(base, d.length, "groups", s.color, describeGroups(s)));
-            return;
-        }
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) pos = 0;
+        try {
+            MsgPack mp = new MsgPack(d);
+            long countLong = mp.readArraySize();
+            int count = (int) countLong;
 
-        int count = arr & 0xFFFF;
-        for (int g = 0; g < count; g++) {
-            int groupStart = pos;
-            GroupInfo gi = parseOneGroup(d, pos);
-            if (gi == null) {
-                s.subItems.add(makeItem(base + groupStart, d.length - groupStart, "group?" , Color.GRAY,
-                    "Could not parse group #" + g + " (msgpack error)"));
-                break;
+            for (int g = 0; g < count; g++) {
+                int groupStart = mp.getPosition();
+                GroupInfo gi = parseOneGroup(mp);
+                if (gi == null) {
+                    s.subItems.add(makeItem(base + groupStart, d.length - groupStart, "group?", Color.GRAY,
+                        "Could not parse group #" + g + " (msgpack error)"));
+                    break;
+                }
+                int size = mp.getPosition() - groupStart;
+                String label = gi.name.isEmpty() ? ("group#" + g) : gi.name;
+                s.subItems.add(makeItem(base + groupStart, size, label, PALETTE[g % PALETTE.length], gi.details));
             }
-            int size = gi.endPos - groupStart;
-            String label = gi.name.isEmpty() ? ("group#" + g) : gi.name;
-            s.subItems.add(makeItem(base + groupStart, size, label, PALETTE[g % PALETTE.length], gi.details));
-            pos = gi.endPos;
-        }
-        if (pos < d.length) {
-            s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
-                "Trailing " + (d.length - pos) + " bytes"));
+            if (mp.hasMore()) {
+                int pos = mp.getPosition();
+                s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
+                    "Trailing " + (d.length - pos) + " bytes"));
+            }
+        } catch (Exception e) {
+            s.subItems.add(makeItem(base, d.length, "groups", s.color, describeGroups(s) + "\n\nError: " + e.getMessage()));
         }
     }
 
     private static class GroupInfo {
-        int endPos;
         String name = "";
         String details = "";
     }
 
     /** Parses one group entry (array of 7 items) from group_pack.c. Returns null on error. */
-    private GroupInfo parseOneGroup(byte[] d, int pos) {
-        int arr = msgpackReadArrayCount(d, pos);
-        if (arr == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        if ((arr & 0xFFFF) != 7) {
-            // Not the expected layout; skip the whole value and report.
-            int after = msgpackSkipValue(d, pos);
-            if (after < 0) return null;
+    private GroupInfo parseOneGroup(MsgPack mp) {
+        try {
+            if (!mp.readArraySizeFixed(7)) return null;
+
             GroupInfo gi = new GroupInfo();
-            gi.endPos = after;
-            gi.details = "Group entry with unexpected item count: " + (arr & 0xFFFF) + " (expected 7)";
-            return gi;
-        }
+            StringBuilder det = new StringBuilder();
 
-        GroupInfo gi = new GroupInfo();
-        StringBuilder det = new StringBuilder();
+            // [1] state values: array(8)
+            if (!mp.readArraySizeFixed(8)) return null;
+            boolean disconnected = mp.readBoolean();
+            int nameLen = (int) mp.readUint();
+            int privacy = (int) mp.readUint();
+            int maxPeers = (int) mp.readUint();
+            int pwdLen = (int) mp.readUint();
+            long version = mp.readUint();
+            long topicLock = mp.readUint();
+            int voice = (int) mp.readUint();
 
-        // [1] state values: array(8): disconnected, name_len, privacy, maxpeers, pwd_len, version, topic_lock, voice
-        int sv = msgpackReadArrayCount(d, pos);
-        if (sv == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        long[] vals = new long[8];
-        boolean valsOk = (sv & 0xFFFF) == 8;
-        for (int i = 0; i < 8 && valsOk; i++) {
-            long[] v = msgpackReadUint(d, pos);
-            if (v == null) { valsOk = false; break; }
-            vals[i] = v[0];
-            pos = (int) v[1];
-        }
-        if (!valsOk) return null;
+            // [2] state binary: array(5)
+            if (!mp.readArraySizeFixed(5)) return null;
+            byte[] sig = mp.readBinFixed(64);
+            byte[] founderPk = mp.readBinFixed(64);
+            byte[] nameBytes = mp.readBinFixed(nameLen);
+            byte[] pwd = mp.readBinFixed(pwdLen);
+            byte[] modHash = mp.readBinFixed(32);
 
-        boolean disconnected = vals[0] != 0;
-        int nameLen = (int) vals[1];
-        int privacy = (int) vals[2];
-        int maxPeers = (int) vals[3];
-        int pwdLen = (int) vals[4];
-        long version = vals[5];
-        long topicLock = vals[6];
-        int voice = (int) vals[7];
+            gi.name = new String(nameBytes, StandardCharsets.UTF_8);
 
-        // [2] state binary: array(5): sig(64), founder_ext_pk(64), name, password, mod_list_hash(32)
-        int sb = msgpackReadArrayCount(d, pos);
-        if (sb == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        if ((sb & 0xFFFF) != 5) return null;
+            // [3] topic info: array(6)
+            if (!mp.readArraySizeFixed(6)) return null;
+            long topicVersion = mp.readUint();
+            int topicLen = (int) mp.readUint();
+            long topicChecksum = mp.readUint();
+            byte[] topicBytes = mp.readBinFixed(topicLen);
+            byte[] topicSigPk = mp.readBinFixed(32);
+            byte[] topicSig = mp.readBinFixed(64);
 
-        byte[] sig = msgpackReadBin(d, pos);       if (sig == null) return null;
-        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
-        byte[] founderPk = msgpackReadBin(d, pos); if (founderPk == null) return null;
-        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
-        byte[] nameBytes = msgpackReadBin(d, pos); if (nameBytes == null) return null;
-        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
-        byte[] pwd = msgpackReadBin(d, pos);       if (pwd == null) return null;
-        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
-        byte[] modHash = msgpackReadBin(d, pos);   if (modHash == null) return null;
-        pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
+            String topicStr = new String(topicBytes, StandardCharsets.UTF_8);
 
-        gi.name = trimNulls(new String(nameBytes, 0, Math.min(nameLen, nameBytes.length), StandardCharsets.UTF_8));
+            // [4] mod list: array(2)
+            if (!mp.readArraySizeFixed(2)) return null;
+            int numMods = (int) mp.readUint();
+            if (numMods == 0) {
+                mp.readNil();
+            } else {
+                mp.readBinFixed(numMods * 32); // skip mod list
+            }
 
-        // [3] topic info: array(6): version, length, checksum, topic, sig_pk(32), sig(64)
-        int ti = msgpackReadArrayCount(d, pos);
-        if (ti == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        String topicStr = "";
-        long topicVersion = 0;
-        if ((ti & 0xFFFF) == 6) {
-            long[] tv = msgpackReadUint(d, pos);   if (tv == null) return null;
-            topicVersion = tv[0]; pos = (int) tv[1];
-            long[] tl = msgpackReadUint(d, pos);   if (tl == null) return null;
-            int topicLen = (int) tl[0]; pos = (int) tl[1];
-            long[] tc = msgpackReadUint(d, pos);   if (tc == null) return null;
-            pos = (int) tc[1];
-            byte[] topicBytes = msgpackReadBin(d, pos); if (topicBytes == null) return null;
-            pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
-            topicStr = trimNulls(new String(topicBytes, 0, Math.min(topicLen, topicBytes.length), StandardCharsets.UTF_8));
-            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // topic sig pk
-            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // topic sig
-        } else {
-            pos = skipMsgpackArrayItems(d, pos, ti & 0xFFFF);
-            if (pos < 0) return null;
-        }
+            // [5] keys: array(4)
+            if (!mp.readArraySizeFixed(4)) return null;
+            byte[] chatPub = mp.readBinFixed(64);
+            byte[] chatSec = mp.readBinFixed(64);
+            byte[] selfPub = mp.readBinFixed(64);
+            byte[] selfSec = mp.readBinFixed(64);
 
-        // [4] mod list: array(2): num_mods, packed list or nil
-        int ml = msgpackReadArrayCount(d, pos);
-        if (ml == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        int numMods = 0;
-        if ((ml & 0xFFFF) == 2) {
-            long[] nm = msgpackReadUint(d, pos);
-            if (nm == null) return null;
-            numMods = (int) nm[0];
-            pos = (int) nm[1];
-            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // mod list bin or nil
-        } else {
-            pos = skipMsgpackArrayItems(d, pos, ml & 0xFFFF);
-            if (pos < 0) return null;
-        }
+            // [6] self info: array(4)
+            if (!mp.readArraySizeFixed(4)) return null;
+            int nickLen = (int) mp.readUint();
+            int selfRole = (int) mp.readUint();
+            int selfStatus = (int) mp.readUint();
+            byte[] nickBytes = mp.readBinFixed(nickLen);
+            String selfNick = new String(nickBytes, StandardCharsets.UTF_8);
 
-        // [5] keys: array(4): chat_pub(64), chat_sec(128), self_pub(64), self_sec(128)
-        int ks = msgpackReadArrayCount(d, pos);
-        if (ks == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        byte[] chatPub = null;
-        if ((ks & 0xFFFF) >= 1) {
-            chatPub = msgpackReadBin(d, pos);
-        }
-        pos = skipMsgpackArrayItems(d, pos, ks & 0xFFFF);
-        if (pos < 0) return null;
+            // [7] saved peers: array(2)
+            if (!mp.readArraySizeFixed(2)) return null;
+            int savedPeerBytes = (int) mp.readUint();
+            if (savedPeerBytes == 0) {
+                mp.readNil();
+            } else {
+                mp.readBinFixed(savedPeerBytes);
+            }
 
-        // [6] self info: array(4): nick_len, role, status, nick
-        int si = msgpackReadArrayCount(d, pos);
-        if (si == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        String selfNick = "";
-        int selfRole = 0;
-        int selfStatus = 0;
-        if ((si & 0xFFFF) == 4) {
-            long[] nl = msgpackReadUint(d, pos);   if (nl == null) return null;
-            int nickLen = (int) nl[0]; pos = (int) nl[1];
-            long[] rl = msgpackReadUint(d, pos);   if (rl == null) return null;
-            selfRole = (int) rl[0]; pos = (int) rl[1];
-            long[] st = msgpackReadUint(d, pos);   if (st == null) return null;
-            selfStatus = (int) st[0]; pos = (int) st[1];
-            byte[] nickBytes = msgpackReadBin(d, pos); if (nickBytes == null) return null;
-            pos = msgpackSkipValue(d, pos); if (pos < 0) return null;
-            selfNick = trimNulls(new String(nickBytes, 0, Math.min(nickLen, nickBytes.length), StandardCharsets.UTF_8));
-        } else {
-            pos = skipMsgpackArrayItems(d, pos, si & 0xFFFF);
-            if (pos < 0) return null;
-        }
-
-        // [7] saved peers: array(2): packed_size, peers bin or nil
-        int sp = msgpackReadArrayCount(d, pos);
-        if (sp == -1) return null;
-        pos = msgpackSkipValue(d, pos);
-        if (pos < 0) return null;
-        int savedPeerBytes = 0;
-        if ((sp & 0xFFFF) == 2) {
-            long[] ps = msgpackReadUint(d, pos);
-            if (ps == null) return null;
-            savedPeerBytes = (int) ps[0];
-            pos = (int) ps[1];
-            pos = msgpackSkipValue(d, pos); if (pos < 0) return null; // peers bin or nil
-        } else {
-            pos = skipMsgpackArrayItems(d, pos, sp & 0xFFFF);
-            if (pos < 0) return null;
-        }
-
-        gi.endPos = pos;
-
-        det.append("Group: \"").append(gi.name).append("\"\n");
-        det.append("State:           ").append(disconnected ? "DISCONNECTED (left/disabled)" : "CONNECTING/CONNECTED").append("\n");
-        det.append("Privacy:         ").append(privacy == 0 ? "PUBLIC" : "PRIVATE").append("\n");
-        det.append("Voice:           ").append(voiceName(voice)).append("\n");
-        det.append("Topic lock:      ").append(topicLock == 0 ? "ENABLED (mods only)" : "DISABLED").append("\n");
-        det.append("Max peers:       ").append(maxPeers).append("\n");
-        det.append("State version:   ").append(version).append("\n");
-        det.append("Password:        ").append(pwdLen > 0 ? "set (" + pwdLen + " bytes)" : "none").append("\n");
-        det.append("Topic:           ").append(topicStr.isEmpty() ? "(empty)" : "\"" + topicStr + "\"").append("\n");
-        det.append("Topic version:   ").append(topicVersion).append("\n");
-        det.append("Moderators:      ").append(numMods).append("\n");
-        if (chatPub != null && chatPub.length >= 32) {
+            det.append("Group: \"").append(gi.name).append("\"\n");
+            det.append("State:           ").append(disconnected ? "DISCONNECTED (left/disabled)" : "CONNECTING/CONNECTED").append("\n");
+            det.append("Privacy:         ").append(privacy == 0 ? "PUBLIC" : "PRIVATE").append("\n");
+            det.append("Voice:           ").append(voiceName(voice)).append("\n");
+            det.append("Topic lock:      ").append(topicLock == 0 ? "ENABLED (mods only)" : "DISABLED").append("\n");
+            det.append("Max peers:       ").append(maxPeers).append("\n");
+            det.append("State version:   ").append(version).append("\n");
+            det.append("Password:        ").append(pwdLen > 0 ? "set (" + pwdLen + " bytes)" : "none").append("\n");
+            det.append("Topic:           ").append(topicStr.isEmpty() ? "(empty)" : "\"" + topicStr + "\"").append("\n");
+            det.append("Topic version:   ").append(topicVersion).append("\n");
+            det.append("Moderators:      ").append(numMods).append("\n");
             det.append("Chat ID:         ").append(hex(Arrays.copyOfRange(chatPub, 32, 64))).append("\n");
-        }
-        det.append("Self nick:       ").append(selfNick.isEmpty() ? "(empty)" : "\"" + selfNick + "\"").append("\n");
-        det.append("Self role:       ").append(roleName(selfRole)).append("\n");
-        det.append("Self status:     ").append(userStatusName(selfStatus)).append("\n");
-        det.append("Saved peer data: ").append(savedPeerBytes).append(" bytes\n");
-        if (founderPk.length >= 64) {
+            det.append("Self nick:       ").append(selfNick.isEmpty() ? "(empty)" : "\"" + selfNick + "\"").append("\n");
+            det.append("Self role:       ").append(roleName(selfRole)).append("\n");
+            det.append("Self status:     ").append(userStatusName(selfStatus)).append("\n");
+            det.append("Saved peer data: ").append(savedPeerBytes).append(" bytes\n");
             det.append("Founder enc pk:  ").append(hex(Arrays.copyOfRange(founderPk, 0, 32))).append("\n");
+            gi.details = det.toString();
+            return gi;
+        } catch (Exception e) {
+            return null;
         }
-        gi.details = det.toString();
-        return gi;
     }
-
-    private int skipMsgpackArrayItems(byte[] d, int pos, int count) {
-        for (int i = 0; i < count; i++) {
-            pos = msgpackSkipValue(d, pos);
-            if (pos < 0) return -1;
-        }
-        return pos;
-    }
-
-    // ------------------------------------------------------------------
-    //  Text descriptions per section
-    // ------------------------------------------------------------------
 
     private String buildDetails(Section s) {
         StringBuilder info = new StringBuilder();
@@ -770,24 +650,24 @@ public class ToxSaveViewer extends JFrame {
 
     private String describeGroups(Section s) {
         byte[] d = s.data;
-        int pos = 0;
-        int arr = msgpackReadArrayCount(d, pos);
-        if (arr == -1) {
-            return "Groups data (" + d.length + " bytes): could not read msgpack array header.\nSee hex dump.";
-        }
-        pos = msgpackSkipValue(d, pos);
-        int count = arr & 0xFFFF;
         StringBuilder sb = new StringBuilder();
-        sb.append(count).append(" saved group chat(s)  (msgpack encoded)\n\n");
-        for (int g = 0; g < count; g++) {
-            GroupInfo gi = parseOneGroup(d, pos);
-            if (gi == null) {
-                sb.append("[group ").append(g).append("]: failed to parse (msgpack error)\n");
-                break;
+        try {
+            MsgPack mp = new MsgPack(d);
+            long countLong = mp.readArraySize();
+            int count = (int) countLong;
+            sb.append(count).append(" saved group chat(s)  (msgpack encoded)\n\n");
+            for (int g = 0; g < count; g++) {
+                GroupInfo gi = parseOneGroup(mp);
+                if (gi == null) {
+                    sb.append("[group ").append(g).append("]: failed to parse (msgpack error)\n");
+                    break;
+                }
+                sb.append("########## Group ").append(g).append(" ##########\n");
+                sb.append(gi.details).append("\n");
             }
-            sb.append("########## Group ").append(g).append(" ##########\n");
-            sb.append(gi.details).append("\n");
-            pos = gi.endPos;
+        } catch (Exception e) {
+            sb.append("Groups data (").append(d.length).append(" bytes): could not read msgpack array header.\n");
+            sb.append("Error: ").append(e.getMessage()).append("\nSee hex dump.");
         }
         return sb.toString();
     }
@@ -816,7 +696,6 @@ public class ToxSaveViewer extends JFrame {
         return describeNodesIn(d, 0, d.length, label);
     }
 
-    /** Lists packed nodes (unpack_nodes from DHT.c) in data[start..start+len). */
     private String describeNodesIn(byte[] d, int start, int len, String label) {
         int pos = start;
         int end = Math.min(start + len, d.length);
@@ -860,10 +739,6 @@ public class ToxSaveViewer extends JFrame {
         }
         return count + " " + label + "(s)\n" + sb.toString();
     }
-
-    // ------------------------------------------------------------------
-    //  Tox ID + low level helpers
-    // ------------------------------------------------------------------
 
     private String computeToxId(byte[] pub, byte[] nospamBytes) {
         byte[] id = new byte[38];
@@ -921,10 +796,6 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    private boolean isIpv6Family(int family) {
-        return family == FAM_IPV6 || family == FAM_TCP_IPV6;
-    }
-
     private String formatIpv4(byte[] ip) {
         return (ip[0] & 0xFF) + "." + (ip[1] & 0xFF) + "." + (ip[2] & 0xFF) + "." + (ip[3] & 0xFF);
     }
@@ -968,136 +839,11 @@ public class ToxSaveViewer extends JFrame {
         return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
     }
 
-    private long readBE32(byte[] b, int off) {
-        return ((b[off] & 0xFFL) << 24) | ((b[off + 1] & 0xFFL) << 16) | ((b[off + 2] & 0xFFL) << 8) | (b[off + 3] & 0xFFL);
-    }
-
     private long readBE64(byte[] b, int off) {
         long v = 0;
         for (int i = 0; i < 8; i++) v = (v << 8) | (b[off + i] & 0xFF);
         return v;
     }
-
-    // ------------------------------------------------------------------
-    //  Minimal msgpack reader (matches bin_unpack usage in group_pack.c)
-    // ------------------------------------------------------------------
-
-    /** Returns array count if data[pos] is a msgpack array header, else -1. */
-    private int msgpackReadArrayCount(byte[] d, int pos) {
-        if (pos < 0 || pos >= d.length) return -1;
-        int b = d[pos] & 0xFF;
-        if (b >= 0x90 && b <= 0x9f) return b & 0x0f;
-        if (b == 0xdc) {
-            if (pos + 3 > d.length) return -1;
-            return readBE16(d, pos + 1);
-        }
-        if (b == 0xdd) {
-            if (pos + 5 > d.length) return -1;
-            long c = readBE32(d, pos + 1);
-            return (c > 0xFFFF) ? -1 : (int) c;
-        }
-        return -1;
-    }
-
-    /** Reads an unsigned int; returns {value, newPos} or null on error. */
-    private long[] msgpackReadUint(byte[] d, int pos) {
-        if (pos < 0 || pos >= d.length) return null;
-        int b = d[pos] & 0xFF;
-        if (b <= 0x7f) return new long[]{b, pos + 1};
-        if (b == 0xcc) {
-            if (pos + 2 > d.length) return null;
-            return new long[]{d[pos + 1] & 0xFFL, pos + 2};
-        }
-        if (b == 0xcd) {
-            if (pos + 3 > d.length) return null;
-            return new long[]{readBE16(d, pos + 1), pos + 3};
-        }
-        if (b == 0xce) {
-            if (pos + 5 > d.length) return null;
-            return new long[]{readBE32(d, pos + 1), pos + 5};
-        }
-        if (b == 0xcf) {
-            if (pos + 9 > d.length) return null;
-            return new long[]{readBE64(d, pos + 1), pos + 9};
-        }
-        return null;
-    }
-
-    /** Reads a bin payload; returns the bytes or null on error. */
-    private byte[] msgpackReadBin(byte[] d, int pos) {
-        if (pos < 0 || pos >= d.length) return null;
-        int b = d[pos] & 0xFF;
-        int len;
-        int hdr;
-        if (b == 0xc4) { hdr = 2; if (pos + hdr > d.length) return null; len = d[pos + 1] & 0xFF; }
-        else if (b == 0xc5) { hdr = 3; if (pos + hdr > d.length) return null; len = readBE16(d, pos + 1); }
-        else if (b == 0xc6) { hdr = 5; if (pos + hdr > d.length) return null; len = (int) readBE32(d, pos + 1); }
-        else return null;
-        if (len < 0 || pos + hdr + len > d.length) return null;
-        return Arrays.copyOfRange(d, pos + hdr, pos + hdr + len);
-    }
-
-    /** Skips one msgpack value at pos; returns new position or -1 on error. */
-    private int msgpackSkipValue(byte[] d, int pos) {
-        if (pos < 0 || pos >= d.length) return -1;
-        int b = d[pos] & 0xFF;
-        if (b <= 0x7f) return pos + 1;                    // positive fixint
-        if (b >= 0x90 && b <= 0x9f) return skipMsgpackArrayItems(d, pos + 1, b & 0x0f);
-        if (b >= 0xa0 && b <= 0xbf) {                     // fixstr
-            int len = b & 0x1f;
-            return (pos + 1 + len <= d.length) ? pos + 1 + len : -1;
-        }
-        if (b >= 0xe0) return pos + 1;                    // negative fixint
-        switch (b) {
-            case 0xc0: return pos + 1;                    // nil
-            case 0xc2: case 0xc3: return pos + 1;         // false / true
-            case 0xc4: { int l = (pos + 2 <= d.length) ? d[pos + 1] & 0xFF : -1;
-                         return (l >= 0 && pos + 2 + l <= d.length) ? pos + 2 + l : -1; }
-            case 0xc5: { if (pos + 3 > d.length) return -1; int l = readBE16(d, pos + 1);
-                         return (pos + 3 + l <= d.length) ? pos + 3 + l : -1; }
-            case 0xc6: { if (pos + 5 > d.length) return -1; int l = (int) readBE32(d, pos + 1);
-                         return (l >= 0 && pos + 5 + l <= d.length) ? pos + 5 + l : -1; }
-            case 0xc7: { if (pos + 2 > d.length) return -1; int l = d[pos + 1] & 0xFF;
-                         return (pos + 3 + l <= d.length) ? pos + 3 + l : -1; }
-            case 0xc8: { if (pos + 3 > d.length) return -1; int l = readBE16(d, pos + 1);
-                         return (pos + 4 + l <= d.length) ? pos + 4 + l : -1; }
-            case 0xc9: { if (pos + 5 > d.length) return -1; int l = (int) readBE32(d, pos + 1);
-                         return (l >= 0 && pos + 6 + l <= d.length) ? pos + 6 + l : -1; }
-            case 0xca: case 0xcc: return pos + 5 <= d.length ? pos + 5 : -1;   // float32, uint8
-            case 0xcb: case 0xcd: return pos + 9 <= d.length ? pos + 9 : -1;   // float64, uint16
-            case 0xce: return pos + 5 <= d.length ? pos + 5 : -1;              // uint32
-            case 0xcf: return pos + 9 <= d.length ? pos + 9 : -1;              // uint64
-            case 0xd0: return pos + 2 <= d.length ? pos + 2 : -1;              // int8
-            case 0xd1: return pos + 3 <= d.length ? pos + 3 : -1;              // int16
-            case 0xd2: return pos + 5 <= d.length ? pos + 5 : -1;              // int32
-            case 0xd3: return pos + 9 <= d.length ? pos + 9 : -1;              // int64
-            case 0xd9: { if (pos + 2 > d.length) return -1; int l = d[pos + 1] & 0xFF;
-                         return (pos + 2 + l <= d.length) ? pos + 2 + l : -1; }
-            case 0xda: { if (pos + 3 > d.length) return -1; int l = readBE16(d, pos + 1);
-                         return (pos + 3 + l <= d.length) ? pos + 3 + l : -1; }
-            case 0xdb: { if (pos + 5 > d.length) return -1; int l = (int) readBE32(d, pos + 1);
-                         return (l >= 0 && pos + 5 + l <= d.length) ? pos + 5 + l : -1; }
-            case 0xdc: { if (pos + 3 > d.length) return -1; return skipMsgpackArrayItems(d, pos + 3, readBE16(d, pos + 1)); }
-            case 0xdd: { if (pos + 5 > d.length) return -1; return skipMsgpackArrayItems(d, pos + 5, (int) readBE32(d, pos + 1)); }
-            case 0xde: { if (pos + 3 > d.length) return -1; return skipMsgpackMapEntries(d, pos + 3, readBE16(d, pos + 1)); }
-            case 0xdf: { if (pos + 5 > d.length) return -1; return skipMsgpackMapEntries(d, pos + 5, (int) readBE32(d, pos + 1)); }
-            default:   return -1;
-        }
-    }
-
-    private int skipMsgpackMapEntries(byte[] d, int pos, int count) {
-        for (int i = 0; i < count; i++) {
-            pos = msgpackSkipValue(d, pos);
-            if (pos < 0) return -1;
-            pos = msgpackSkipValue(d, pos);
-            if (pos < 0) return -1;
-        }
-        return pos;
-    }
-
-    // ------------------------------------------------------------------
-    //  Hex dump
-    // ------------------------------------------------------------------
 
     private String getHexDump(byte[] data) {
         if (data == null || data.length == 0) return "(empty)\n";
@@ -1123,10 +869,6 @@ public class ToxSaveViewer extends JFrame {
         }
         return sb.toString();
     }
-
-    // ------------------------------------------------------------------
-    //  Model classes
-    // ------------------------------------------------------------------
 
     class Section {
         int offset;
@@ -1178,10 +920,6 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    // ------------------------------------------------------------------
-    //  Top chart: one bar per section
-    // ------------------------------------------------------------------
-
     class ChartPanel extends JPanel {
         List<Section> sections;
         byte[] fileData;
@@ -1191,7 +929,7 @@ public class ToxSaveViewer extends JFrame {
 
         public ChartPanel() {
             setBackground(Color.LIGHT_GRAY);
-            int h = scale(56);
+            int h = scale(MAIN_CHART_HEIGHT);
             setPreferredSize(new Dimension(scale(700), h));
             setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
 
@@ -1289,10 +1027,6 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    // ------------------------------------------------------------------
-    //  Zoom chart: sub-blocks of the selected section
-    // ------------------------------------------------------------------
-
     class ZoomPanel extends JPanel {
         Section section;
         List<SubItem> items;
@@ -1300,7 +1034,7 @@ public class ToxSaveViewer extends JFrame {
 
         public ZoomPanel() {
             setBackground(new Color(245, 245, 245));
-            int h = scale(68);
+            int h = scale(ZOOM_CHART_HEIGHT);
             setPreferredSize(new Dimension(scale(700), h));
             setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
 
