@@ -10,12 +10,16 @@ import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.BorderLayout;
 import java.awt.FlowLayout;
+import java.awt.GridBagLayout;
+import java.awt.GridBagConstraints;
 import java.awt.Toolkit;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.*;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 import java.nio.charset.StandardCharsets;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -32,16 +36,41 @@ public class ToxSaveViewer extends JFrame {
         return Math.round(base * GLOBAL_SCALE);
     }
 
+    private static final Color[] PALETTE = {
+        new Color(230, 25, 75),  new Color(60, 180, 75),  new Color(255, 225, 25),
+        new Color(0, 130, 200),  new Color(245, 130, 48), new Color(145, 30, 180),
+        new Color(70, 240, 240), new Color(240, 50, 230), new Color(210, 245, 60),
+        new Color(250, 190, 190),new Color(0, 128, 128),  new Color(230, 190, 255),
+        new Color(170, 110, 40), new Color(128, 0, 0),    new Color(170, 255, 195),
+        new Color(255, 250, 200)
+    };
+
+    // Saved_Friend layout from Messenger.c (friend_size() == 2216 bytes)
+    private static final int FRIEND_SIZE = 2216;
+    private static final int OFF_STATUS = 0;
+    private static final int OFF_REAL_PK = 1;
+    private static final int OFF_INFO = 33;
+    private static final int OFF_INFO_SIZE = 1058;
+    private static final int OFF_NAME = 1060;
+    private static final int OFF_NAME_LEN = 1188;
+    private static final int OFF_STATUSMSG = 1190;
+    private static final int OFF_STATUSMSG_LEN = 2198;
+    private static final int OFF_USERSTATUS = 2200;
+    private static final int OFF_NOSPAM = 2204;
+    private static final int OFF_LASTSEEN = 2208;
+
     private List<Section> sections = new ArrayList<>();
     private byte[] fileData;
     private ChartPanel chartPanel;
+    private ZoomPanel zoomPanel;
     private JPanel legendPanel;
     private JTextArea detailsArea;
     private JLabel fileLabel;
+    private Section selectedSection;
 
     public ToxSaveViewer() {
         setTitle("Tox Save File Viewer");
-        setSize(scale(820), scale(640));
+        setSize(scale(780), scale(640));
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
@@ -52,23 +81,34 @@ public class ToxSaveViewer extends JFrame {
         topPanel.add(fileLabel);
 
         chartPanel = new ChartPanel();
+        zoomPanel = new ZoomPanel();
         legendPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(8)));
 
-        JPanel centerPanel = new JPanel(new BorderLayout());
-        centerPanel.setBorder(BorderFactory.createEmptyBorder(scale(10), scale(10), scale(10), scale(10)));
-        centerPanel.add(chartPanel, BorderLayout.CENTER);
-        centerPanel.add(legendPanel, BorderLayout.SOUTH);
+        JPanel chartsPanel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.gridx = 0;
+        gbc.weightx = 1;
 
-        detailsArea = new JTextArea(20, 100);
+        gbc.gridy = 0; gbc.weighty = 0.52; gbc.fill = GridBagConstraints.BOTH;
+        chartsPanel.add(chartPanel, gbc);
+
+        gbc.gridy = 1; gbc.weighty = 0.48; gbc.fill = GridBagConstraints.BOTH;
+        chartsPanel.add(zoomPanel, gbc);
+
+        gbc.gridy = 2; gbc.weighty = 0; gbc.fill = GridBagConstraints.HORIZONTAL;
+        chartsPanel.add(legendPanel, gbc);
+
+        detailsArea = new JTextArea(18, 100);
         detailsArea.setFont(UIManager.getFont("TextArea.font"));
         detailsArea.setEditable(false);
         JScrollPane scrollPane = new JScrollPane(detailsArea);
-        scrollPane.setBorder(BorderFactory.createTitledBorder("Section Details (Hover or click a bar / legend item)"));
+        scrollPane.setBorder(BorderFactory.createTitledBorder("Details (hover the bars above, then hover the zoom blocks)"));
+        scrollPane.setPreferredSize(new Dimension(scale(760), scale(230)));
 
         JPanel mainPanel = new JPanel(new BorderLayout(scale(10), scale(10)));
         mainPanel.setBorder(BorderFactory.createEmptyBorder(scale(10), scale(10), scale(10), scale(10)));
         mainPanel.add(topPanel, BorderLayout.NORTH);
-        mainPanel.add(centerPanel, BorderLayout.CENTER);
+        mainPanel.add(chartsPanel, BorderLayout.CENTER);
         mainPanel.add(scrollPane, BorderLayout.SOUTH);
 
         add(mainPanel);
@@ -95,9 +135,8 @@ public class ToxSaveViewer extends JFrame {
             parseData(fileData);
             fileLabel.setText(f.getName() + " (" + fileData.length + " bytes)");
             chartPanel.setData(fileData, sections);
-            chartPanel.setHighlightType(-1);
             updateLegend();
-            detailsArea.setText("");
+            selectSection(largestSection());
         } catch (Exception e) {
             JOptionPane.showMessageDialog(this, "Error loading file: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
@@ -127,17 +166,13 @@ public class ToxSaveViewer extends JFrame {
             int cookie = readLE16(b, pos + 6);
 
             if (cookie != 0x01ce) {
-                System.err.println("Warning: Invalid section cookie at offset " + pos);
                 break;
             }
-
             if (lengthLong < 0 || pos + 8 + lengthLong > b.length) {
-                System.err.println("Warning: Truncated or invalid section at offset " + pos);
                 break;
             }
 
             int length = (int) lengthLong;
-
             Section s = new Section();
             s.offset = pos;
             s.length = length;
@@ -146,18 +181,181 @@ public class ToxSaveViewer extends JFrame {
             if (length > 0) {
                 System.arraycopy(b, pos + 8, s.data, 0, length);
             }
-
             SectionType st = SectionType.fromId(type);
             s.typeName = st.name;
             s.color = st.color;
-
+            buildSubItems(s);
             sections.add(s);
             pos += 8 + length;
         }
     }
 
     // ------------------------------------------------------------------
-    //  Detailed content decoding per section type
+    //  Selection / linking between chart, zoom and legend
+    // ------------------------------------------------------------------
+
+    private void selectSection(Section s) {
+        selectedSection = s;
+        zoomPanel.setSection(s);
+        if (s != null) {
+            chartPanel.setHighlightType(s.type);
+            detailsArea.setText(buildDetails(s));
+            detailsArea.setCaretPosition(0);
+        } else {
+            chartPanel.setHighlightType(-1);
+        }
+    }
+
+    private Section largestSection() {
+        Section best = null;
+        for (Section s : sections) {
+            if (best == null || s.length > best.length) best = s;
+        }
+        return best;
+    }
+
+    private Section findFirstSectionOfType(int type) {
+        for (Section s : sections) if (s.type == type) return s;
+        return null;
+    }
+
+    // ------------------------------------------------------------------
+    //  Sub-item construction (the coloured zoom blocks)
+    // ------------------------------------------------------------------
+
+    private SubItem makeItem(int offsetInFile, int length, String label, Color color, String details) {
+        SubItem it = new SubItem();
+        it.offsetInFile = offsetInFile;
+        it.length = length;
+        it.label = label;
+        it.color = color;
+        it.details = details;
+        return it;
+    }
+
+    private void buildSubItems(Section s) {
+        s.subItems = new ArrayList<>();
+        byte[] d = s.data;
+        int base = s.offset + 8;
+        switch (s.type) {
+            case 1: buildNospamKeySubItems(s); break;
+            case 2: s.subItems.add(makeItem(base, d.length, "DHT state", s.color, describeDht(s))); break;
+            case 3: buildFriendSubItems(s); break;
+            case 4: s.subItems.add(makeItem(base, d.length, "name", s.color, describeText(d, "Self name"))); break;
+            case 5: s.subItems.add(makeItem(base, d.length, "status msg", s.color, describeText(d, "Status message"))); break;
+            case 6: s.subItems.add(makeItem(base, d.length, "status", s.color, describeUserStatus(d))); break;
+            case 7: s.subItems.add(makeItem(base, d.length, "groups", s.color, describeGroups(s))); break;
+            case 10: buildNodeSubItems(s, "TCP relay"); break;
+            case 11: buildNodeSubItems(s, "Path node"); break;
+            case 20: s.subItems.add(makeItem(base, d.length, "conferences", s.color, describeConferences(s))); break;
+            case 255: s.subItems.add(makeItem(base, 0, "end", Color.BLACK, "End-of-save marker (no payload)")); break;
+            default: s.subItems.add(makeItem(base, d.length, "data", Color.WHITE, "(unknown section)")); break;
+        }
+    }
+
+    private void buildNospamKeySubItems(Section s) {
+        byte[] d = s.data;
+        int base = s.offset + 8;
+        if (d.length >= 68) {
+            long nospam = readLE32(d, 0);
+            byte[] nospamBytes = Arrays.copyOfRange(d, 0, 4);
+            byte[] pub = Arrays.copyOfRange(d, 4, 36);
+            byte[] sec = Arrays.copyOfRange(d, 36, 68);
+            String toxId = computeToxId(pub, nospamBytes);
+            s.subItems.add(makeItem(base, 4, "nospam", new Color(245, 130, 48),
+                "Nospam: 0x" + String.format("%08X", nospam) + "   (decimal " + nospam + ")"));
+            s.subItems.add(makeItem(base + 4, 32, "public key", new Color(0, 130, 200),
+                "Public key:\n" + hex(pub) + "\n\nDerived Tox ID:\n" + toxId));
+            s.subItems.add(makeItem(base + 36, 32, "secret key", new Color(220, 20, 60),
+                "Secret key  <-- SENSITIVE:\n" + hex(sec)));
+        } else {
+            s.subItems.add(makeItem(base, d.length, "keys", s.color, "(unexpected size " + d.length + ")"));
+        }
+    }
+
+    private void buildFriendSubItems(Section s) {
+        byte[] d = s.data;
+        int base = s.offset + 8;
+        int num = d.length / FRIEND_SIZE;
+        for (int i = 0; i < num; i++) {
+            int off = i * FRIEND_SIZE;
+            int status = d[off + OFF_STATUS] & 0xFF;
+            byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
+            if (status >= 3) {
+                int nl = readBE16(d, off + OFF_NAME_LEN);
+                String name = trimNulls(new String(d, off + OFF_NAME, clampLen(nl, 128, d.length - off - OFF_NAME), StandardCharsets.UTF_8));
+                int sl = readBE16(d, off + OFF_STATUSMSG_LEN);
+                String sm = trimNulls(new String(d, off + OFF_STATUSMSG, clampLen(sl, 1007, d.length - off - OFF_STATUSMSG), StandardCharsets.UTF_8));
+                int us = d[off + OFF_USERSTATUS] & 0xFF;
+                long ls = readBE64(d, off + OFF_LASTSEEN);
+                StringBuilder det = new StringBuilder();
+                det.append("Friend #").append(i).append("   [CONFIRMED]\n");
+                det.append("Name:           ").append(name.isEmpty() ? "(empty)" : name).append("\n");
+                det.append("Status message: ").append(sm.isEmpty() ? "(empty)" : sm).append("\n");
+                det.append("User status:    ").append(userStatusName(us)).append("\n");
+                det.append("Public key:     ").append(hex(pk)).append("\n");
+                det.append("Last seen:      ").append(formatTime(ls)).append("\n");
+                s.subItems.add(makeItem(base + off, FRIEND_SIZE, name.isEmpty() ? ("friend#" + i) : name,
+                        PALETTE[i % PALETTE.length], det.toString()));
+            } else {
+                int il = readBE16(d, off + OFF_INFO_SIZE);
+                String info = trimNulls(new String(d, off + OFF_INFO, clampLen(il, 1024, d.length - off - OFF_INFO), StandardCharsets.UTF_8));
+                byte[] nospam = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
+                String toxId = computeToxId(pk, nospam);
+                StringBuilder det = new StringBuilder();
+                det.append("Friend #").append(i).append("   [")
+                   .append(status == 1 ? "FRIEND_ADDED" : "FRIEND_REQUESTED").append(" - pending]\n");
+                det.append("Request message: ").append(info.isEmpty() ? "(empty)" : info).append("\n");
+                det.append("Public key:      ").append(hex(pk)).append("\n");
+                det.append("Full Tox ID:     ").append(toxId).append("\n");
+                s.subItems.add(makeItem(base + off, FRIEND_SIZE, "pending#" + i,
+                        new Color(169, 169, 169), det.toString()));
+            }
+        }
+        int leftover = d.length % FRIEND_SIZE;
+        if (leftover > 0) {
+            s.subItems.add(makeItem(base + num * FRIEND_SIZE, leftover, "pad", Color.GRAY,
+                "Trailing " + leftover + " bytes (not a full friend record)"));
+        }
+    }
+
+    private void buildNodeSubItems(Section s, String label) {
+        byte[] d = s.data;
+        int base = s.offset + 8;
+        int pos = 0;
+        int idx = 0;
+        while (pos < d.length) {
+            int family = d[pos] & 0xFF;
+            if (family == 2 && pos + 39 <= d.length) {
+                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 5);
+                int port = readBE16(d, pos + 5);
+                byte[] key = Arrays.copyOfRange(d, pos + 7, pos + 39);
+                String ipstr = formatIpv4(ip);
+                s.subItems.add(makeItem(base + pos, 39, ipstr, PALETTE[idx % PALETTE.length],
+                    label + " #" + idx + "\nAddress:    " + ipstr + ":" + port +
+                    "\nFamily:     IPv4\nPublic key: " + hex(key)));
+                pos += 39; idx++;
+            } else if (isIpv6Family(family) && pos + 51 <= d.length) {
+                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 17);
+                int port = readBE16(d, pos + 17);
+                byte[] key = Arrays.copyOfRange(d, pos + 19, pos + 51);
+                String ipstr = formatIpv6(ip);
+                s.subItems.add(makeItem(base + pos, 51, ipstr, PALETTE[idx % PALETTE.length],
+                    label + " #" + idx + "\nAddress:    " + ipstr + ":" + port +
+                    "\nFamily:     IPv6\nPublic key: " + hex(key)));
+                pos += 51; idx++;
+            } else {
+                if (d.length - pos > 0) {
+                    s.subItems.add(makeItem(base + pos, d.length - pos, "other", Color.GRAY,
+                        "Unparsed trailing data (" + (d.length - pos) + " bytes)"));
+                }
+                break;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Text descriptions per section
     // ------------------------------------------------------------------
 
     private String buildDetails(Section s) {
@@ -165,7 +363,7 @@ public class ToxSaveViewer extends JFrame {
         info.append("Type: ").append(s.typeName).append(" (").append(s.type).append(")\n");
         info.append("Offset: ").append(s.offset).append(" bytes\n");
         info.append("Data Size: ").append(s.length).append(" bytes\n");
-        info.append("Total Size: ").append(s.length + 8).append(" bytes\n");
+        info.append("Parts: ").append(s.subItems.size()).append("\n");
         info.append("\n========== PARSED CONTENT ==========\n");
         info.append(describeSection(s));
         info.append("\n========== RAW HEX DUMP ==========\n");
@@ -173,42 +371,27 @@ public class ToxSaveViewer extends JFrame {
         return info.toString();
     }
 
-    // Legend items use the SAME output as the bars. If a type appears more
-    // than once, every occurrence is listed with the identical format.
-    private String buildDetailsForType(SectionType st) {
-        List<Section> matches = new ArrayList<>();
-        for (Section s : sections) {
-            if (s.type == st.id) matches.add(s);
-        }
-        if (matches.isEmpty()) {
-            return "No section of type " + st.name + " is present in this file.";
-        }
-        if (matches.size() == 1) {
-            return buildDetails(matches.get(0));
-        }
+    private String buildSubItemDetails(Section s, SubItem it, int idx) {
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < matches.size(); i++) {
-            sb.append("########## Occurrence ").append(i + 1)
-              .append(" of ").append(matches.size()).append(" ##########\n");
-            sb.append(buildDetails(matches.get(i)));
-            sb.append("\n\n");
-        }
+        sb.append("Section: ").append(s.typeName).append("\n");
+        sb.append("Part ").append(idx + 1).append(" of ").append(s.subItems.size()).append("\n");
+        sb.append("Offset: ").append(it.offsetInFile).append("   Size: ").append(it.length).append(" bytes\n");
+        sb.append("\n").append(it.details).append("\n");
         return sb.toString();
     }
 
     private String describeSection(Section s) {
-        byte[] d = s.data;
         switch (s.type) {
-            case 1:  return describeNospamKeys(d);
-            case 2:  return describeNodeList(d, "DHT node");
-            case 3:  return describeFriends(d);
-            case 4:  return describeText(d, "Self name");
-            case 5:  return describeText(d, "Status message");
-            case 6:  return describeUserStatus(d);
-            case 7:  return describeGroups(d);
-            case 10: return describeNodeList(d, "TCP relay");
-            case 11: return describeNodeList(d, "Path node");
-            case 20: return describeConferences(d);
+            case 1:  return describeNospamKeys(s.data);
+            case 2:  return describeDht(s);
+            case 3:  return describeFriends(s);
+            case 4:  return describeText(s.data, "Self name");
+            case 5:  return describeText(s.data, "Status message");
+            case 6:  return describeUserStatus(s.data);
+            case 7:  return describeGroups(s);
+            case 10: return describeNodeList(s.data, "TCP relay");
+            case 11: return describeNodeList(s.data, "Path node");
+            case 20: return describeConferences(s);
             case 255: return "(End-of-save marker, no payload)";
             default: return "(Unknown section type)";
         }
@@ -216,43 +399,123 @@ public class ToxSaveViewer extends JFrame {
 
     private String describeText(byte[] d, String label) {
         if (d.length == 0) return label + ": (empty)";
-        String text = new String(d, StandardCharsets.UTF_8);
+        String text = trimNulls(new String(d, StandardCharsets.UTF_8));
         return label + ": \"" + text + "\"\n(" + d.length + " UTF-8 bytes)";
     }
 
     private String describeUserStatus(byte[] d) {
         if (d.length < 1) return "(empty)";
-        int st = d[0] & 0xFF;
-        String name;
-        switch (st) {
-            case 0:  name = "NONE (appears Online)"; break;
-            case 1:  name = "AWAY"; break;
-            case 2:  name = "BUSY"; break;
-            default: name = "Unknown (" + st + ")"; break;
+        return "User status: " + userStatusName(d[0] & 0xFF);
+    }
+
+    private String describeDht(Section s) {
+        return "DHT state (" + s.length + " bytes).\n" +
+               "Saved DHT routing data: close nodes and DHT friend entries used to\n" +
+               "reconnect to the network quickly. Binary structure; see hex dump.";
+    }
+
+    private String describeFriends(Section s) {
+        byte[] d = s.data;
+        int num = d.length / FRIEND_SIZE;
+        StringBuilder sb = new StringBuilder();
+        sb.append(num).append(" friend record(s)  (each ").append(FRIEND_SIZE).append(" bytes)\n\n");
+        for (int i = 0; i < num; i++) {
+            int off = i * FRIEND_SIZE;
+            int status = d[off + OFF_STATUS] & 0xFF;
+            byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
+            if (status >= 3) {
+                int nl = readBE16(d, off + OFF_NAME_LEN);
+                String name = trimNulls(new String(d, off + OFF_NAME, clampLen(nl, 128, d.length - off - OFF_NAME), StandardCharsets.UTF_8));
+                int sl = readBE16(d, off + OFF_STATUSMSG_LEN);
+                String sm = trimNulls(new String(d, off + OFF_STATUSMSG, clampLen(sl, 1007, d.length - off - OFF_STATUSMSG), StandardCharsets.UTF_8));
+                int us = d[off + OFF_USERSTATUS] & 0xFF;
+                long ls = readBE64(d, off + OFF_LASTSEEN);
+                sb.append("[").append(i).append("] CONFIRMED  name=\"").append(name)
+                  .append("\"  status=").append(userStatusName(us))
+                  .append("  lastSeen=").append(formatTime(ls)).append("\n");
+                sb.append("      msg=\"").append(sm).append("\"\n");
+                sb.append("      pubkey=").append(hex(pk)).append("\n");
+            } else {
+                int il = readBE16(d, off + OFF_INFO_SIZE);
+                String info = trimNulls(new String(d, off + OFF_INFO, clampLen(il, 1024, d.length - off - OFF_INFO), StandardCharsets.UTF_8));
+                byte[] nospam = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
+                sb.append("[").append(i).append("] ").append(status == 1 ? "ADDED" : "REQUESTED")
+                  .append("(pending)  msg=\"").append(info).append("\"\n");
+                sb.append("      pubkey=").append(hex(pk)).append("\n");
+                sb.append("      toxId=").append(computeToxId(pk, nospam)).append("\n");
+            }
         }
-        return "User status: " + name;
+        return sb.toString();
+    }
+
+    private String describeGroups(Section s) {
+        byte[] d = s.data;
+        StringBuilder sb = new StringBuilder();
+        sb.append("Group chats (NGC), msgpack-encoded (" + d.length + " bytes).\n");
+        if (d.length > 0) {
+            int b0 = d[0] & 0xFF;
+            if (b0 >= 0x90 && b0 <= 0x9f) {
+                sb.append("Best effort: msgpack array with " + (b0 & 0x0f) + " group(s).\n");
+            } else if (b0 == 0xdc && d.length >= 3) {
+                sb.append("Best effort: msgpack array with " + readBE16(d, 1) + " group(s).\n");
+            } else {
+                sb.append("(First byte 0x" + String.format("%02X", b0) + "; could not detect array header.)\n");
+            }
+        }
+        sb.append("See raw hex dump below.");
+        return sb.toString();
+    }
+
+    private String describeConferences(Section s) {
+        return "Conferences (classic audio/text) (" + s.length + " bytes).\n" +
+               "Saved conference state. See raw hex dump below.";
     }
 
     private String describeNospamKeys(byte[] d) {
-        if (d.length < 68) {
-            return "(Expected at least 68 bytes for keys, got " + d.length + ")\n";
-        }
+        if (d.length < 68) return "(Expected at least 68 bytes, got " + d.length + ")";
         long nospam = readLE32(d, 0);
         byte[] nospamBytes = Arrays.copyOfRange(d, 0, 4);
         byte[] pub = Arrays.copyOfRange(d, 4, 36);
         byte[] sec = Arrays.copyOfRange(d, 36, 68);
-
         StringBuilder sb = new StringBuilder();
         sb.append("Nospam:      0x").append(String.format("%08X", nospam))
           .append("   (decimal ").append(nospam).append(")\n");
         sb.append("Public key:  ").append(hex(pub)).append("\n");
         sb.append("Secret key:  ").append(hex(sec)).append("   <-- sensitive\n");
         sb.append("\nDerived Tox ID:\n  ").append(computeToxId(pub, nospamBytes)).append("\n");
-        if (d.length > 68) {
-            sb.append("\n(").append(d.length - 68).append(" extra bytes beyond standard keys)\n");
-        }
         return sb.toString();
     }
+
+    private String describeNodeList(byte[] d, String label) {
+        int pos = 0;
+        int count = 0;
+        StringBuilder sb = new StringBuilder();
+        while (pos < d.length) {
+            int family = d[pos] & 0xFF;
+            if (family == 2 && pos + 39 <= d.length) {
+                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 5);
+                int port = readBE16(d, pos + 5);
+                byte[] key = Arrays.copyOfRange(d, pos + 7, pos + 39);
+                sb.append("  [").append(count).append("] ").append(formatIpv4(ip)).append(":").append(port)
+                  .append("   key=").append(hex(key)).append("\n");
+                pos += 39; count++;
+            } else if (isIpv6Family(family) && pos + 51 <= d.length) {
+                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 17);
+                int port = readBE16(d, pos + 17);
+                byte[] key = Arrays.copyOfRange(d, pos + 19, pos + 51);
+                sb.append("  [").append(count).append("] ").append(formatIpv6(ip)).append(":").append(port)
+                  .append("   key=").append(hex(key)).append("\n");
+                pos += 51; count++;
+            } else {
+                break;
+            }
+        }
+        return count + " " + label + "(s)\n" + sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    //  Tox ID + helpers
+    // ------------------------------------------------------------------
 
     private String computeToxId(byte[] pub, byte[] nospamBytes) {
         byte[] id = new byte[38];
@@ -267,43 +530,28 @@ public class ToxSaveViewer extends JFrame {
     private int checksum16(byte[] data, int len) {
         int checksum = 0;
         for (int i = 0; i + 1 < len; i += 2) {
-            int value = (data[i] & 0xFF) | ((data[i + 1] & 0xFF) << 8);
-            checksum ^= value;
+            checksum ^= (data[i] & 0xFF) | ((data[i + 1] & 0xFF) << 8);
         }
         return checksum & 0xFFFF;
     }
 
-    private String describeNodeList(byte[] d, String label) {
-        int pos = 0;
-        List<String> nodes = new ArrayList<>();
-        while (pos < d.length) {
-            int family = d[pos] & 0xFF;
-            if (family == 2 && pos + 39 <= d.length) {
-                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 5);
-                int port = ((d[pos + 5] & 0xFF) << 8) | (d[pos + 6] & 0xFF);
-                byte[] key = Arrays.copyOfRange(d, pos + 7, pos + 39);
-                nodes.add(formatIpv4(ip) + ":" + port + "   key=" + hex(key));
-                pos += 39;
-            } else if (isIpv6Family(family) && pos + 51 <= d.length) {
-                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 17);
-                int port = ((d[pos + 17] & 0xFF) << 8) | (d[pos + 18] & 0xFF);
-                byte[] key = Arrays.copyOfRange(d, pos + 19, pos + 51);
-                nodes.add(formatIpv6(ip) + ":" + port + "   key=" + hex(key));
-                pos += 51;
-            } else {
-                break;
-            }
+    private String userStatusName(int st) {
+        switch (st) {
+            case 0: return "NONE/Online";
+            case 1: return "AWAY";
+            case 2: return "BUSY";
+            default: return "Unknown(" + st + ")";
         }
+    }
 
-        StringBuilder sb = new StringBuilder();
-        sb.append(nodes.size()).append(" ").append(label).append("(s) saved\n");
-        for (int i = 0; i < nodes.size(); i++) {
-            sb.append("  [").append(i).append("] ").append(nodes.get(i)).append("\n");
+    private String formatTime(long unixSeconds) {
+        if (unixSeconds <= 0) return "(never)";
+        try {
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+            return sdf.format(new Date(unixSeconds * 1000L)) + "  (unix " + unixSeconds + ")";
+        } catch (Exception e) {
+            return "unix " + unixSeconds;
         }
-        if (pos < d.length) {
-            sb.append("(Note: ").append(d.length - pos).append(" trailing bytes not parsed as nodes)\n");
-        }
-        return sb.toString();
     }
 
     private boolean isIpv6Family(int family) {
@@ -323,29 +571,22 @@ public class ToxSaveViewer extends JFrame {
         return "[" + sb + "]";
     }
 
-    private String describeFriends(byte[] d) {
-        return "Friend list (" + d.length + " bytes).\n" +
-               "Contains one record per friend: status, public key, name, status message,\n" +
-               "user status, DHT node cache, and file-transfer state. This is a nested\n" +
-               "binary structure; see the raw hex dump below for the full data.";
-    }
-
-    private String describeGroups(byte[] d) {
-        return "Group chats (" + d.length + " bytes).\n" +
-               "Stores saved group/conference membership and state. Nested binary\n" +
-               "structure; see raw hex dump below.";
-    }
-
-    private String describeConferences(byte[] d) {
-        return "Conferences (" + d.length + " bytes).\n" +
-               "Stores saved audio/text conference state. Nested binary structure;\n" +
-               "see raw hex dump below.";
-    }
-
     private String hex(byte[] data) {
         StringBuilder sb = new StringBuilder();
         for (byte b : data) sb.append(String.format("%02X", b));
         return sb.toString();
+    }
+
+    private String trimNulls(String s) {
+        int end = s.length();
+        while (end > 0 && s.charAt(end - 1) == '\0') end--;
+        return s.substring(0, end);
+    }
+
+    private int clampLen(int requested, int maxField, int available) {
+        int len = Math.min(requested, maxField);
+        len = Math.min(len, available);
+        return Math.max(len, 0);
     }
 
     private int readLE16(byte[] b, int off) {
@@ -354,6 +595,20 @@ public class ToxSaveViewer extends JFrame {
 
     private long readLE32(byte[] b, int off) {
         return (b[off] & 0xFFL) | ((b[off + 1] & 0xFFL) << 8) | ((b[off + 2] & 0xFFL) << 16) | ((b[off + 3] & 0xFFL) << 24);
+    }
+
+    private int readBE16(byte[] b, int off) {
+        return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
+    }
+
+    private long readBE32(byte[] b, int off) {
+        return ((b[off] & 0xFFL) << 24) | ((b[off + 1] & 0xFFL) << 16) | ((b[off + 2] & 0xFFL) << 8) | (b[off + 3] & 0xFFL);
+    }
+
+    private long readBE64(byte[] b, int off) {
+        long v = 0;
+        for (int i = 0; i < 8; i++) v = (v << 8) | (b[off + i] & 0xFF);
+        return v;
     }
 
     private void updateLegend() {
@@ -387,19 +642,13 @@ public class ToxSaveViewer extends JFrame {
             MouseAdapter ma = new MouseAdapter() {
                 @Override
                 public void mouseEntered(MouseEvent e) {
-                    chartPanel.setHighlightType(st.id);
-                    detailsArea.setText(buildDetailsForType(st));
-                    detailsArea.setCaretPosition(0);
-                }
-                @Override
-                public void mouseExited(MouseEvent e) {
-                    chartPanel.setHighlightType(-1);
+                    Section s = findFirstSectionOfType(st.id);
+                    if (s != null) selectSection(s);
                 }
                 @Override
                 public void mouseClicked(MouseEvent e) {
-                    chartPanel.setHighlightType(st.id);
-                    detailsArea.setText(buildDetailsForType(st));
-                    detailsArea.setCaretPosition(0);
+                    Section s = findFirstSectionOfType(st.id);
+                    if (s != null) selectSection(s);
                 }
             };
             item.addMouseListener(ma);
@@ -418,29 +667,28 @@ public class ToxSaveViewer extends JFrame {
         for (int i = 0; i < data.length; i += 16) {
             sb.append(String.format("%08X: ", i));
             for (int j = 0; j < 16; j++) {
-                if (i + j < data.length) {
-                    sb.append(String.format("%02X ", data[i + j] & 0xFF));
-                } else {
-                    sb.append("   ");
-                }
+                if (i + j < data.length) sb.append(String.format("%02X ", data[i + j] & 0xFF));
+                else sb.append("   ");
             }
             sb.append(" ");
             for (int j = 0; j < 16; j++) {
                 if (i + j < data.length) {
                     int c = data[i + j] & 0xFF;
                     sb.append((c >= 32 && c < 127) ? (char) c : '.');
-                } else {
-                    sb.append(" ");
-                }
+                } else sb.append(" ");
             }
             sb.append("\n");
             if (i > 512) {
-                sb.append("... (hex dump truncated, parsed content above is complete)\n");
+                sb.append("... (hex dump truncated)\n");
                 break;
             }
         }
         return sb.toString();
     }
+
+    // ------------------------------------------------------------------
+    //  Model classes
+    // ------------------------------------------------------------------
 
     class Section {
         int offset;
@@ -449,6 +697,16 @@ public class ToxSaveViewer extends JFrame {
         String typeName;
         Color color;
         byte[] data;
+        int x, w;
+        List<SubItem> subItems = new ArrayList<>();
+    }
+
+    class SubItem {
+        int offsetInFile;
+        int length;
+        String label;
+        Color color;
+        String details;
         int x, w;
     }
 
@@ -477,32 +735,30 @@ public class ToxSaveViewer extends JFrame {
         }
 
         public static SectionType fromId(int id) {
-            for (SectionType t : values()) {
-                if (t.id == id) return t;
-            }
+            for (SectionType t : values()) if (t.id == id) return t;
             return UNKNOWN;
         }
     }
+
+    // ------------------------------------------------------------------
+    //  Top chart: one bar per section
+    // ------------------------------------------------------------------
 
     class ChartPanel extends JPanel {
         List<Section> sections;
         byte[] fileData;
         private final int pad = scale(20);
         private int highlightType = -1;
+        private Section lastHovered;
 
         public ChartPanel() {
             setBackground(Color.LIGHT_GRAY);
-            setPreferredSize(new Dimension(scale(700), scale(260)));
-
+            setPreferredSize(new Dimension(scale(700), scale(180)));
             MouseAdapter ma = new MouseAdapter() {
                 @Override
-                public void mouseMoved(MouseEvent e) {
-                    handleMouseMove(e.getX(), e.getY());
-                }
+                public void mouseMoved(MouseEvent e) { handleMouseMove(e.getX(), e.getY()); }
                 @Override
-                public void mouseClicked(MouseEvent e) {
-                    handleMouseMove(e.getX(), e.getY());
-                }
+                public void mouseClicked(MouseEvent e) { handleMouseMove(e.getX(), e.getY()); }
             };
             addMouseMotionListener(ma);
             addMouseListener(ma);
@@ -511,6 +767,7 @@ public class ToxSaveViewer extends JFrame {
         public void setData(byte[] data, List<Section> sections) {
             this.fileData = data;
             this.sections = sections;
+            this.lastHovered = null;
             repaint();
         }
 
@@ -522,8 +779,6 @@ public class ToxSaveViewer extends JFrame {
         }
 
         private void handleMouseMove(int mx, int my) {
-            setHighlightType(-1);
-
             Section hovered = null;
             if (sections != null) {
                 int availableHeight = getHeight() - pad * 2;
@@ -536,8 +791,10 @@ public class ToxSaveViewer extends JFrame {
             }
             if (hovered != null) {
                 setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-                detailsArea.setText(buildDetails(hovered));
-                detailsArea.setCaretPosition(0);
+                if (hovered != lastHovered) {
+                    lastHovered = hovered;
+                    selectSection(hovered);
+                }
             } else {
                 setCursor(Cursor.getDefaultCursor());
             }
@@ -554,7 +811,6 @@ public class ToxSaveViewer extends JFrame {
 
             int availableWidth = getWidth() - pad * 2;
             int availableHeight = getHeight() - pad * 2;
-
             if (availableWidth <= 0 || availableHeight <= 0) return;
 
             double pixelScale = availableWidth / (double) fileData.length;
@@ -564,7 +820,6 @@ public class ToxSaveViewer extends JFrame {
                 int x = pad + (int) (s.offset * pixelScale);
                 int w = (int) ((s.length + 8) * pixelScale);
                 if (w == 0 && (s.length + 8) > 0) w = 1;
-
                 s.x = x;
                 s.w = w;
 
@@ -573,7 +828,6 @@ public class ToxSaveViewer extends JFrame {
 
                 g2d.setColor(dim ? new Color(210, 210, 210) : s.color);
                 g2d.fillRect(x, pad, w, availableHeight);
-
                 g2d.setColor(dim ? Color.GRAY : Color.BLACK);
                 g2d.drawRect(x, pad, w, availableHeight);
 
@@ -590,6 +844,142 @@ public class ToxSaveViewer extends JFrame {
                     g2d.drawRect(x + 1, pad + 1, Math.max(w - 2, 1), availableHeight - 2);
                     g2d.setStroke(new BasicStroke(1f));
                 }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Zoom chart: sub-blocks of the selected section
+    // ------------------------------------------------------------------
+
+    class ZoomPanel extends JPanel {
+        Section section;
+        List<SubItem> items;
+        int hoveredIndex = -1;
+
+        public ZoomPanel() {
+            setBackground(new Color(245, 245, 245));
+            setPreferredSize(new Dimension(scale(700), scale(150)));
+            MouseAdapter ma = new MouseAdapter() {
+                @Override
+                public void mouseMoved(MouseEvent e) { handleZoomMouse(e.getX(), e.getY()); }
+                @Override
+                public void mouseClicked(MouseEvent e) { handleZoomMouse(e.getX(), e.getY()); }
+                @Override
+                public void mouseExited(MouseEvent e) {
+                    hoveredIndex = -1;
+                    if (section != null) {
+                        detailsArea.setText(buildDetails(section));
+                        detailsArea.setCaretPosition(0);
+                    }
+                    repaint();
+                }
+            };
+            addMouseMotionListener(ma);
+            addMouseListener(ma);
+        }
+
+        public void setSection(Section s) {
+            this.section = s;
+            this.items = (s != null) ? s.subItems : null;
+            this.hoveredIndex = -1;
+            repaint();
+        }
+
+        private int zoomPad() { return scale(15); }
+        private int zoomTopY() { return zoomPad() + scale(18); }
+        private int zoomBarH() { return Math.max(getHeight() - zoomTopY() - zoomPad(), scale(24)); }
+
+        private void handleZoomMouse(int mx, int my) {
+            if (items == null || items.isEmpty()) {
+                if (section != null) {
+                    detailsArea.setText(buildDetails(section));
+                    detailsArea.setCaretPosition(0);
+                }
+                return;
+            }
+            int idx = -1;
+            int topY = zoomTopY();
+            int barH = zoomBarH();
+            for (int i = 0; i < items.size(); i++) {
+                SubItem it = items.get(i);
+                if (mx >= it.x && mx < it.x + it.w && my >= topY && my < topY + barH) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx != hoveredIndex) {
+                hoveredIndex = idx;
+                repaint();
+            }
+            if (idx >= 0) {
+                setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                detailsArea.setText(buildSubItemDetails(section, items.get(idx), idx));
+                detailsArea.setCaretPosition(0);
+            } else {
+                setCursor(Cursor.getDefaultCursor());
+                detailsArea.setText(buildDetails(section));
+                detailsArea.setCaretPosition(0);
+            }
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2d = (Graphics2D) g;
+            g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+            int pad = zoomPad();
+            g2d.setColor(Color.DARK_GRAY);
+
+            if (section == null) {
+                g2d.drawString("Zoom: hover a section bar above to inspect its contents", pad, getHeight() / 2);
+                return;
+            }
+
+            g2d.drawString("Zoom: " + section.typeName + "  (" + section.length + " bytes, " +
+                    (items == null ? 0 : items.size()) + " parts)", pad, pad + scale(4));
+
+            if (items == null || items.isEmpty()) return;
+
+            int topY = zoomTopY();
+            int barH = zoomBarH();
+            int availW = getWidth() - pad * 2;
+            if (availW <= 0) return;
+
+            long total = 0;
+            for (SubItem it : items) total += it.length;
+            if (total == 0) total = 1;
+
+            int x = pad;
+            for (int i = 0; i < items.size(); i++) {
+                SubItem it = items.get(i);
+                int w = (int) (availW * (it.length / (double) total));
+                if (w == 0 && it.length > 0) w = 1;
+                it.x = x;
+                it.w = w;
+                boolean hovered = (i == hoveredIndex);
+
+                g2d.setColor(it.color);
+                g2d.fillRect(x, topY, w, barH);
+                if (hovered) {
+                    g2d.setColor(new Color(255, 200, 0));
+                    g2d.setStroke(new BasicStroke(3f));
+                    g2d.drawRect(x, topY, w, barH);
+                    g2d.setStroke(new BasicStroke(1f));
+                } else {
+                    g2d.setColor(Color.BLACK);
+                    g2d.drawRect(x, topY, w, barH);
+                }
+
+                FontMetrics fm = g2d.getFontMetrics();
+                if (w > fm.stringWidth(it.label) + 8) {
+                    g2d.setColor(Color.BLACK);
+                    int ty = topY + (barH + fm.getAscent() - fm.getDescent()) / 2;
+                    g2d.drawString(it.label, x + 4, ty);
+                }
+                x += w;
             }
         }
     }
