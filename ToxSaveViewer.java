@@ -364,69 +364,113 @@ public class ToxSaveViewer extends JFrame {
             int status = d[off + OFF_STATUS] & 0xFF;
             byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
             
+            int infoSize = readBE16(d, off + OFF_INFO_SIZE);
+            if (infoSize > 1024) infoSize = 1024;
+            String info = trimNulls(new String(d, off + OFF_INFO, infoSize, StandardCharsets.UTF_8));
+            
+            int nameLen = readBE16(d, off + OFF_NAME_LEN);
+            if (nameLen > 128) nameLen = 128;
+            String name = trimNulls(new String(d, off + OFF_NAME, nameLen, StandardCharsets.UTF_8));
+            
+            int msgLen = readBE16(d, off + OFF_STATUSMSG_LEN);
+            if (msgLen > 1007) msgLen = 1007;
+            String msg = trimNulls(new String(d, off + OFF_STATUSMSG, msgLen, StandardCharsets.UTF_8));
+            
+            int userStatus = d[off + OFF_USERSTATUS] & 0xFF;
+            long lastSeen = readBE64(d, off + OFF_LASTSEEN);
+            long nospam = readLE32(d, off + OFF_NOSPAM);
+            byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
+            
             StringBuilder det = new StringBuilder();
             det.append("Friend #").append(i).append(" (Total: 2216 bytes)\n");
             det.append(String.format("  [%4d bytes] Status: %s\n", 1, getFriendStatusName(status)));
             det.append(String.format("  [%4d bytes] Public Key: %s\n", 32, hex(pk)));
+            det.append(String.format("  [%4d bytes] Info (Request Msg): \"%s\"\n", 1024, info.isEmpty() ? "(empty)" : info));
+            det.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
+            det.append(String.format("  [%4d bytes] Info Size: %d\n", 2, infoSize));
+            det.append(String.format("  [%4d bytes] Name: \"%s\"\n", 128, name.isEmpty() ? "(empty)" : name));
+            det.append(String.format("  [%4d bytes] Name Length: %d\n", 2, nameLen));
+            det.append(String.format("  [%4d bytes] Status Message: \"%s\"\n", 1007, msg.isEmpty() ? "(empty)" : msg));
+            det.append(String.format("  [%4d bytes] Padding (after status message)\n", 1));
+            det.append(String.format("  [%4d bytes] Status Message Length: %d\n", 2, msgLen));
+            det.append(String.format("  [%4d bytes] User Status: %s\n", 1, userStatusName(userStatus)));
+            det.append(String.format("  [%4d bytes] Padding (after user status)\n", 3));
+            det.append(String.format("  [%4d bytes] Nospam: 0x%08X (%d)\n", 4, nospam, nospam));
+            det.append(String.format("  [%4d bytes] Last Seen: %s\n", 8, formatTime(lastSeen)));
             
+            det.append("\n--- Derived Tox ID (for pending requests) ---\n");
+            det.append(String.format("  [%4d bytes] Tox ID: %s\n", 38, computeToxId(pk, nospamBytes)));
+            
+            String label;
+            Color color;
             if (status == 1 || status == 2) {
-                int infoSize = readBE16(d, off + OFF_INFO_SIZE);
-                if (infoSize > 1024) infoSize = 1024;
-                String info = trimNulls(new String(d, off + OFF_INFO, infoSize, StandardCharsets.UTF_8));
-                long nospam = readLE32(d, off + OFF_NOSPAM);
-                byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
-                
-                det.append("\n--- Pending Request Details ---\n");
-                det.append(String.format("  [%4d bytes] Request Message: \"%s\"\n", 1024, info.isEmpty() ? "(empty)" : info));
-                det.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
-                det.append(String.format("  [%4d bytes] Info Size: %d\n", 2, infoSize));
-                det.append(String.format("  [%4d bytes] Nospam: 0x%08X (%d)\n", 4, nospam, nospam));
-                det.append(String.format("  [%4d bytes] Derived Tox ID (38 bytes): %s\n", 38, computeToxId(pk, nospamBytes)));
-                
-                det.append("\n(Note: Name, Status Message, User Status, and Last Seen are zeroed/empty for pending requests)\n");
-                
-                String label = (status == 1 ? "OUT: " : "IN: ") + (info.isEmpty() ? "friend#" + i : info.substring(0, Math.min(15, info.length())));
-                s.subItems.add(makeItem(base + off, FRIEND_SIZE, label, new Color(255, 165, 0), det.toString()));
-                
+                label = (status == 1 ? "OUT: " : "IN: ") + (info.isEmpty() ? "friend#" + i : info.substring(0, Math.min(15, info.length())));
+                color = new Color(255, 165, 0);
             } else if (status == 3) {
-                int nameLen = readBE16(d, off + OFF_NAME_LEN);
-                if (nameLen > 128) nameLen = 128;
-                String name = trimNulls(new String(d, off + OFF_NAME, nameLen, StandardCharsets.UTF_8));
-                
-                int msgLen = readBE16(d, off + OFF_STATUSMSG_LEN);
-                if (msgLen > 1007) msgLen = 1007;
-                String msg = trimNulls(new String(d, off + OFF_STATUSMSG, msgLen, StandardCharsets.UTF_8));
-                
-                int userStatus = d[off + OFF_USERSTATUS] & 0xFF;
-                long lastSeen = readBE64(d, off + OFF_LASTSEEN);
-                
-                det.append("\n--- Confirmed Friend Details ---\n");
-                det.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
-                det.append(String.format("  [%4d bytes] Info Size: 0 (ignored)\n", 2));
-                det.append(String.format("  [%4d bytes] Name: \"%s\"\n", 128, name.isEmpty() ? "(empty)" : name));
-                det.append(String.format("  [%4d bytes] Name Length: %d\n", 2, nameLen));
-                det.append(String.format("  [%4d bytes] Status Message: \"%s\"\n", 1007, msg.isEmpty() ? "(empty)" : msg));
-                det.append(String.format("  [%4d bytes] Padding (after status message)\n", 1));
-                det.append(String.format("  [%4d bytes] Status Message Length: %d\n", 2, msgLen));
-                det.append(String.format("  [%4d bytes] User Status: %s\n", 1, userStatusName(userStatus)));
-                det.append(String.format("  [%4d bytes] Padding (after user status)\n", 3));
-                det.append(String.format("  [%4d bytes] Nospam: (ignored for confirmed)\n", 4));
-                det.append(String.format("  [%4d bytes] Last Seen: %s\n", 8, formatTime(lastSeen)));
-                
-                s.subItems.add(makeItem(base + off, FRIEND_SIZE, name.isEmpty() ? ("friend#" + i) : name, PALETTE[i % PALETTE.length], det.toString()));
-                
+                label = name.isEmpty() ? ("friend#" + i) : name;
+                color = PALETTE[i % PALETTE.length];
             } else {
-                det.append("\n--- Empty Slot ---\n");
-                det.append("  (All remaining 2215 bytes are zeroed)\n");
-                s.subItems.add(makeItem(base + off, FRIEND_SIZE, "empty#" + i, Color.GRAY, det.toString()));
+                label = "empty#" + i;
+                color = Color.GRAY;
             }
+            
+            s.subItems.add(makeItem(base + off, FRIEND_SIZE, label, color, det.toString()));
         }
-        
         int leftover = d.length % FRIEND_SIZE;
         if (leftover > 0) {
             s.subItems.add(makeItem(base + num * FRIEND_SIZE, leftover, "pad", Color.GRAY,
                 "Trailing " + leftover + " bytes (not a full friend record)"));
         }
+    }
+
+    private String describeFriends(Section s) {
+        byte[] d = s.data;
+        int num = d.length / FRIEND_SIZE;
+        StringBuilder sb = new StringBuilder();
+        sb.append(num).append(" friend record(s)  (each ").append(FRIEND_SIZE).append(" bytes)\n\n");
+        for (int i = 0; i < num; i++) {
+            int off = i * FRIEND_SIZE;
+            int status = d[off + OFF_STATUS] & 0xFF;
+            byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
+            
+            int infoSize = readBE16(d, off + OFF_INFO_SIZE);
+            if (infoSize > 1024) infoSize = 1024;
+            String info = trimNulls(new String(d, off + OFF_INFO, infoSize, StandardCharsets.UTF_8));
+            
+            int nameLen = readBE16(d, off + OFF_NAME_LEN);
+            if (nameLen > 128) nameLen = 128;
+            String name = trimNulls(new String(d, off + OFF_NAME, nameLen, StandardCharsets.UTF_8));
+            
+            int msgLen = readBE16(d, off + OFF_STATUSMSG_LEN);
+            if (msgLen > 1007) msgLen = 1007;
+            String msg = trimNulls(new String(d, off + OFF_STATUSMSG, msgLen, StandardCharsets.UTF_8));
+            
+            int userStatus = d[off + OFF_USERSTATUS] & 0xFF;
+            long lastSeen = readBE64(d, off + OFF_LASTSEEN);
+            long nospam = readLE32(d, off + OFF_NOSPAM);
+            byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
+            
+            sb.append("========== Friend #").append(i).append(" (Total: 2216 bytes) ==========\n");
+            sb.append(String.format("  [%4d bytes] Status: %s\n", 1, getFriendStatusName(status)));
+            sb.append(String.format("  [%4d bytes] Public Key: %s\n", 32, hex(pk)));
+            sb.append(String.format("  [%4d bytes] Info (Request Msg): \"%s\"\n", 1024, info.isEmpty() ? "(empty)" : info));
+            sb.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
+            sb.append(String.format("  [%4d bytes] Info Size: %d\n", 2, infoSize));
+            sb.append(String.format("  [%4d bytes] Name: \"%s\"\n", 128, name.isEmpty() ? "(empty)" : name));
+            sb.append(String.format("  [%4d bytes] Name Length: %d\n", 2, nameLen));
+            sb.append(String.format("  [%4d bytes] Status Message: \"%s\"\n", 1007, msg.isEmpty() ? "(empty)" : msg));
+            sb.append(String.format("  [%4d bytes] Padding (after status message)\n", 1));
+            sb.append(String.format("  [%4d bytes] Status Message Length: %d\n", 2, msgLen));
+            sb.append(String.format("  [%4d bytes] User Status: %s\n", 1, userStatusName(userStatus)));
+            sb.append(String.format("  [%4d bytes] Padding (after user status)\n", 3));
+            sb.append(String.format("  [%4d bytes] Nospam: 0x%08X (%d)\n", 4, nospam, nospam));
+            sb.append(String.format("  [%4d bytes] Last Seen: %s\n", 8, formatTime(lastSeen)));
+            
+            sb.append("\n--- Derived Tox ID (for pending requests) ---\n");
+            sb.append(String.format("  [%4d bytes] Tox ID: %s\n", 38, computeToxId(pk, nospamBytes)));
+            sb.append("\n");
+        }
+        return sb.toString();
     }
 
     private String getFriendStatusName(int status) {
@@ -753,65 +797,6 @@ public class ToxSaveViewer extends JFrame {
                 sb.append("Unknown DHT sub-section type ").append(type).append(" (").append(len).append(" bytes)\n");
             }
             pos += 8 + len;
-        }
-        return sb.toString();
-    }
-
-    private String describeFriends(Section s) {
-        byte[] d = s.data;
-        int num = d.length / FRIEND_SIZE;
-        StringBuilder sb = new StringBuilder();
-        sb.append(num).append(" friend record(s)  (each ").append(FRIEND_SIZE).append(" bytes)\n\n");
-        for (int i = 0; i < num; i++) {
-            int off = i * FRIEND_SIZE;
-            int status = d[off + OFF_STATUS] & 0xFF;
-            byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
-            
-            sb.append("========== Friend #").append(i).append(" (Total: 2216 bytes) ==========\n");
-            sb.append(String.format("  [%4d bytes] Status: %s\n", 1, getFriendStatusName(status)));
-            sb.append(String.format("  [%4d bytes] Public Key: %s\n", 32, hex(pk)));
-            
-            if (status == 1 || status == 2) {
-                int infoSize = readBE16(d, off + OFF_INFO_SIZE);
-                if (infoSize > 1024) infoSize = 1024;
-                String info = trimNulls(new String(d, off + OFF_INFO, infoSize, StandardCharsets.UTF_8));
-                long nospam = readLE32(d, off + OFF_NOSPAM);
-                byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
-                
-                sb.append(String.format("  [%4d bytes] Request Message: \"%s\"\n", 1024, info.isEmpty() ? "(empty)" : info));
-                sb.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
-                sb.append(String.format("  [%4d bytes] Info Size: %d\n", 2, infoSize));
-                sb.append(String.format("  [%4d bytes] Nospam: 0x%08X (%d)\n", 4, nospam, nospam));
-                sb.append(String.format("  [%4d bytes] Derived Tox ID (38 bytes): %s\n", 38, computeToxId(pk, nospamBytes)));
-                sb.append("\n(Note: Name, Status Message, User Status, and Last Seen are zeroed/empty for pending requests)\n");
-            } else if (status == 3) {
-                int nameLen = readBE16(d, off + OFF_NAME_LEN);
-                if (nameLen > 128) nameLen = 128;
-                String name = trimNulls(new String(d, off + OFF_NAME, nameLen, StandardCharsets.UTF_8));
-                
-                int msgLen = readBE16(d, off + OFF_STATUSMSG_LEN);
-                if (msgLen > 1007) msgLen = 1007;
-                String msg = trimNulls(new String(d, off + OFF_STATUSMSG, msgLen, StandardCharsets.UTF_8));
-                
-                int userStatus = d[off + OFF_USERSTATUS] & 0xFF;
-                long lastSeen = readBE64(d, off + OFF_LASTSEEN);
-                
-                sb.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
-                sb.append(String.format("  [%4d bytes] Info Size: 0 (ignored)\n", 2));
-                sb.append(String.format("  [%4d bytes] Name: \"%s\"\n", 128, name.isEmpty() ? "(empty)" : name));
-                sb.append(String.format("  [%4d bytes] Name Length: %d\n", 2, nameLen));
-                sb.append(String.format("  [%4d bytes] Status Message: \"%s\"\n", 1007, msg.isEmpty() ? "(empty)" : msg));
-                sb.append(String.format("  [%4d bytes] Padding (after status message)\n", 1));
-                sb.append(String.format("  [%4d bytes] Status Message Length: %d\n", 2, msgLen));
-                sb.append(String.format("  [%4d bytes] User Status: %s\n", 1, userStatusName(userStatus)));
-                sb.append(String.format("  [%4d bytes] Padding (after user status)\n", 3));
-                sb.append(String.format("  [%4d bytes] Nospam: (ignored for confirmed)\n", 4));
-                sb.append(String.format("  [%4d bytes] Last Seen: %s\n", 8, formatTime(lastSeen)));
-            } else {
-                sb.append("\n--- Empty Slot ---\n");
-                sb.append("  (All remaining 2215 bytes are zeroed)\n");
-            }
-            sb.append("\n");
         }
         return sb.toString();
     }
