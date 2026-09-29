@@ -1,4 +1,5 @@
 import javax.swing.*;
+import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Cursor;
 import java.awt.Graphics;
@@ -62,7 +63,7 @@ public class ToxSaveViewer extends JFrame {
         detailsArea.setFont(UIManager.getFont("TextArea.font"));
         detailsArea.setEditable(false);
         JScrollPane scrollPane = new JScrollPane(detailsArea);
-        scrollPane.setBorder(BorderFactory.createTitledBorder("Section Details (Hover or click a bar)"));
+        scrollPane.setBorder(BorderFactory.createTitledBorder("Section Details (Hover or click a bar / legend item)"));
 
         JPanel mainPanel = new JPanel(new BorderLayout(scale(10), scale(10)));
         mainPanel.setBorder(BorderFactory.createEmptyBorder(scale(10), scale(10), scale(10), scale(10)));
@@ -94,6 +95,7 @@ public class ToxSaveViewer extends JFrame {
             parseData(fileData);
             fileLabel.setText(f.getName() + " (" + fileData.length + " bytes)");
             chartPanel.setData(fileData, sections);
+            chartPanel.setHighlightType(-1);
             updateLegend();
             detailsArea.setText("");
         } catch (Exception e) {
@@ -169,6 +171,29 @@ public class ToxSaveViewer extends JFrame {
         info.append("\n========== RAW HEX DUMP ==========\n");
         info.append(getHexDump(s.data));
         return info.toString();
+    }
+
+    // Legend items use the SAME output as the bars. If a type appears more
+    // than once, every occurrence is listed with the identical format.
+    private String buildDetailsForType(SectionType st) {
+        List<Section> matches = new ArrayList<>();
+        for (Section s : sections) {
+            if (s.type == st.id) matches.add(s);
+        }
+        if (matches.isEmpty()) {
+            return "No section of type " + st.name + " is present in this file.";
+        }
+        if (matches.size() == 1) {
+            return buildDetails(matches.get(0));
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < matches.size(); i++) {
+            sb.append("########## Occurrence ").append(i + 1)
+              .append(" of ").append(matches.size()).append(" ##########\n");
+            sb.append(buildDetails(matches.get(i)));
+            sb.append("\n\n");
+        }
+        return sb.toString();
     }
 
     private String describeSection(Section s) {
@@ -254,14 +279,12 @@ public class ToxSaveViewer extends JFrame {
         while (pos < d.length) {
             int family = d[pos] & 0xFF;
             if (family == 2 && pos + 39 <= d.length) {
-                // IPv4: 1 family + 4 ip + 2 port + 32 key = 39
                 byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 5);
                 int port = ((d[pos + 5] & 0xFF) << 8) | (d[pos + 6] & 0xFF);
                 byte[] key = Arrays.copyOfRange(d, pos + 7, pos + 39);
                 nodes.add(formatIpv4(ip) + ":" + port + "   key=" + hex(key));
                 pos += 39;
             } else if (isIpv6Family(family) && pos + 51 <= d.length) {
-                // IPv6: 1 family + 16 ip + 2 port + 32 key = 51
                 byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 17);
                 int port = ((d[pos + 17] & 0xFF) << 8) | (d[pos + 18] & 0xFF);
                 byte[] key = Arrays.copyOfRange(d, pos + 19, pos + 51);
@@ -336,18 +359,54 @@ public class ToxSaveViewer extends JFrame {
     private void updateLegend() {
         legendPanel.removeAll();
         legendPanel.add(new JLabel("Legend:"));
+        Cursor hand = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR);
+
         for (SectionType t : SectionType.values()) {
             if (t == SectionType.UNKNOWN) continue;
             boolean used = false;
             for (Section s : sections) if (s.type == t.id) { used = true; break; }
             if (!used) continue;
 
+            JPanel item = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(4), 0));
+            item.setOpaque(false);
+            item.setCursor(hand);
+
             JPanel colorBox = new JPanel();
             colorBox.setBackground(t.color);
             colorBox.setBorder(BorderFactory.createLineBorder(Color.BLACK));
             colorBox.setPreferredSize(new Dimension(scale(16), scale(16)));
-            legendPanel.add(colorBox);
-            legendPanel.add(new JLabel(t.name));
+            colorBox.setCursor(hand);
+
+            JLabel label = new JLabel(t.name);
+            label.setCursor(hand);
+
+            item.add(colorBox);
+            item.add(label);
+
+            final SectionType st = t;
+            MouseAdapter ma = new MouseAdapter() {
+                @Override
+                public void mouseEntered(MouseEvent e) {
+                    chartPanel.setHighlightType(st.id);
+                    detailsArea.setText(buildDetailsForType(st));
+                    detailsArea.setCaretPosition(0);
+                }
+                @Override
+                public void mouseExited(MouseEvent e) {
+                    chartPanel.setHighlightType(-1);
+                }
+                @Override
+                public void mouseClicked(MouseEvent e) {
+                    chartPanel.setHighlightType(st.id);
+                    detailsArea.setText(buildDetailsForType(st));
+                    detailsArea.setCaretPosition(0);
+                }
+            };
+            item.addMouseListener(ma);
+            colorBox.addMouseListener(ma);
+            label.addMouseListener(ma);
+
+            legendPanel.add(item);
         }
         legendPanel.revalidate();
         legendPanel.repaint();
@@ -429,6 +488,7 @@ public class ToxSaveViewer extends JFrame {
         List<Section> sections;
         byte[] fileData;
         private final int pad = scale(20);
+        private int highlightType = -1;
 
         public ChartPanel() {
             setBackground(Color.LIGHT_GRAY);
@@ -454,7 +514,16 @@ public class ToxSaveViewer extends JFrame {
             repaint();
         }
 
+        public void setHighlightType(int type) {
+            if (this.highlightType != type) {
+                this.highlightType = type;
+                repaint();
+            }
+        }
+
         private void handleMouseMove(int mx, int my) {
+            setHighlightType(-1);
+
             Section hovered = null;
             if (sections != null) {
                 int availableHeight = getHeight() - pad * 2;
@@ -489,6 +558,7 @@ public class ToxSaveViewer extends JFrame {
             if (availableWidth <= 0 || availableHeight <= 0) return;
 
             double pixelScale = availableWidth / (double) fileData.length;
+            boolean highlighting = highlightType >= 0;
 
             for (Section s : sections) {
                 int x = pad + (int) (s.offset * pixelScale);
@@ -498,17 +568,27 @@ public class ToxSaveViewer extends JFrame {
                 s.x = x;
                 s.w = w;
 
-                g2d.setColor(s.color);
+                boolean isMatch = s.type == highlightType;
+                boolean dim = highlighting && !isMatch;
+
+                g2d.setColor(dim ? new Color(210, 210, 210) : s.color);
                 g2d.fillRect(x, pad, w, availableHeight);
 
-                g2d.setColor(Color.BLACK);
+                g2d.setColor(dim ? Color.GRAY : Color.BLACK);
                 g2d.drawRect(x, pad, w, availableHeight);
 
                 FontMetrics fm = g2d.getFontMetrics();
-                if (w > fm.stringWidth(s.typeName) + 10) {
+                if (!dim && w > fm.stringWidth(s.typeName) + 10) {
                     g2d.setColor(Color.BLACK);
                     int textY = pad + (availableHeight + fm.getAscent() - fm.getDescent()) / 2;
                     g2d.drawString(s.typeName, x + 5, textY);
+                }
+
+                if (isMatch) {
+                    g2d.setColor(new Color(255, 200, 0));
+                    g2d.setStroke(new BasicStroke(3f));
+                    g2d.drawRect(x + 1, pad + 1, Math.max(w - 2, 1), availableHeight - 2);
+                    g2d.setStroke(new BasicStroke(1f));
                 }
             }
         }
