@@ -42,6 +42,7 @@ public class ToxSaveViewer extends JFrame {
         new Color(255, 250, 200)
     };
 
+    // Saved_Friend layout from Messenger.c (friend_size() == 2216 bytes)
     private static final int FRIEND_SIZE = 2216;
     private static final int OFF_STATUS = 0;
     private static final int OFF_REAL_PK = 1;
@@ -304,78 +305,6 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    /** CONFERENCES section: raw binary packed structs (group.c) */
-    private void buildConferenceSubItems(Section s) {
-        byte[] d = s.data;
-        int base = s.offset + 8;
-        int pos = 0;
-        int confIdx = 0;
-
-        while (pos < d.length) {
-            int confStart = pos;
-            // Minimum header size: 1 (type) + 32 (id) + 4 (msg) + 2 (lossy) + 2 (peer) + 4 (num) + 1 (title_len) = 46
-            if (pos + 46 > d.length) break; 
-
-            int type = d[pos] & 0xFF; pos += 1;
-            byte[] id = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
-            long msgNum = readLE32(d, pos); pos += 4;
-            int lossyMsgNum = readLE16(d, pos); pos += 2;
-            int peerNum = readLE16(d, pos); pos += 2;
-            long numPeersLong = readLE32(d, pos); pos += 4;
-            int numPeers = (int) numPeersLong;
-            
-            int titleLen = d[pos] & 0xFF; pos += 1;
-            if (pos + titleLen > d.length) break;
-            String title = trimNulls(new String(d, pos, titleLen, StandardCharsets.UTF_8));
-            pos += titleLen;
-
-            StringBuilder det = new StringBuilder();
-            det.append("Conference #").append(confIdx).append("\n");
-            det.append("Type: ").append(type == 0 ? "TEXT" : "AV (Audio/Video)").append(" (").append(type).append(")\n");
-            det.append("ID: ").append(hex(id)).append("\n");
-            det.append("Title: \"").append(title).append("\"\n");
-            det.append("Self peer #: ").append(peerNum).append("\n");
-            det.append("Msg #: ").append(msgNum).append("\n");
-            det.append("Peers saved: ").append(numPeers).append("\n\n");
-
-            boolean parseError = false;
-            for (int p = 0; p < numPeers; p++) {
-                // Peer size: 32 (real) + 32 (temp) + 2 (peer_num) + 8 (last_active) + 1 (nick_len) = 75
-                if (pos + 75 > d.length) { parseError = true; break; }
-                byte[] realPk = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
-                byte[] tempPk = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
-                int pNum = readLE16(d, pos); pos += 2;
-                long lastActive = readLE64(d, pos); pos += 8;
-                int nickLen = d[pos] & 0xFF; pos += 1;
-                if (pos + nickLen > d.length) { parseError = true; break; }
-                String nick = trimNulls(new String(d, pos, nickLen, StandardCharsets.UTF_8));
-                pos += nickLen;
-
-                det.append("  [Peer ").append(p).append("] #").append(pNum).append(" \"").append(nick).append("\"\n");
-                det.append("    real_pk: ").append(hex(realPk)).append("\n");
-                det.append("    last_active: ").append(lastActive).append(" (mono_time)\n");
-            }
-
-            if (parseError) {
-                det.append("\n[Parse error: truncated peer data]\n");
-            }
-
-            int size = pos - confStart;
-            String label = title.isEmpty() ? ("conf#" + confIdx) : title;
-            s.subItems.add(makeItem(base + confStart, size, label, PALETTE[confIdx % PALETTE.length], det.toString()));
-            confIdx++;
-        }
-        
-        if (pos < d.length) {
-            s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
-                "Trailing " + (d.length - pos) + " bytes not parsed"));
-        }
-        
-        if (confIdx == 0 && s.subItems.isEmpty()) {
-            s.subItems.add(makeItem(base, d.length, "empty", s.color, "No connected conferences saved."));
-        }
-    }
-
     private void buildNodeSubItems(Section s, String label, boolean tcpEnabled) {
         buildNodeSubItemsAt(s, s.data, 0, s.data.length, s.offset + 8, label);
     }
@@ -434,35 +363,47 @@ public class ToxSaveViewer extends JFrame {
             int off = i * FRIEND_SIZE;
             int status = d[off + OFF_STATUS] & 0xFF;
             byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
-            if (status >= 3) {
-                int nl = readBE16(d, off + OFF_NAME_LEN);
-                String name = trimNulls(new String(d, off + OFF_NAME, clampLen(nl, 128, d.length - off - OFF_NAME), StandardCharsets.UTF_8));
-                int sl = readBE16(d, off + OFF_STATUSMSG_LEN);
-                String sm = trimNulls(new String(d, off + OFF_STATUSMSG, clampLen(sl, 1007, d.length - off - OFF_STATUSMSG), StandardCharsets.UTF_8));
-                int us = d[off + OFF_USERSTATUS] & 0xFF;
-                long ls = readBE64(d, off + OFF_LASTSEEN);
-                StringBuilder det = new StringBuilder();
-                det.append("Friend #").append(i).append("   [CONFIRMED]\n");
-                det.append("Name:           ").append(name.isEmpty() ? "(empty)" : name).append("\n");
-                det.append("Status message: ").append(sm.isEmpty() ? "(empty)" : sm).append("\n");
-                det.append("User status:    ").append(userStatusName(us)).append("\n");
-                det.append("Public key:     ").append(hex(pk)).append("\n");
-                det.append("Last seen:      ").append(formatTime(ls)).append("\n");
-                s.subItems.add(makeItem(base + off, FRIEND_SIZE, name.isEmpty() ? ("friend#" + i) : name,
-                        PALETTE[i % PALETTE.length], det.toString()));
+            
+            StringBuilder det = new StringBuilder();
+            det.append("Friend #").append(i).append("\n");
+            det.append("Status: ").append(getFriendStatusName(status)).append("\n");
+            det.append("Public Key: ").append(hex(pk)).append("\n");
+            
+            if (status == 1 || status == 2) {
+                int infoSize = readBE16(d, off + OFF_INFO_SIZE);
+                if (infoSize > 1024) infoSize = 1024;
+                String info = trimNulls(new String(d, off + OFF_INFO, infoSize, StandardCharsets.UTF_8));
+                long nospam = readLE32(d, off + OFF_NOSPAM);
+                byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
+                
+                det.append("\n--- Pending Request Details ---\n");
+                det.append("Request Message: \"").append(info.isEmpty() ? "(empty)" : info).append("\"\n");
+                det.append("Nospam: 0x").append(String.format("%08X", nospam)).append(" (").append(nospam).append(")\n");
+                det.append("Derived Tox ID: ").append(computeToxId(pk, nospamBytes)).append("\n");
+                
+                String label = (status == 1 ? "OUT: " : "IN: ") + (info.isEmpty() ? "friend#" + i : info.substring(0, Math.min(15, info.length())));
+                s.subItems.add(makeItem(base + off, FRIEND_SIZE, label, new Color(255, 165, 0), det.toString()));
+            } else if (status == 3) {
+                int nameLen = readBE16(d, off + OFF_NAME_LEN);
+                if (nameLen > 128) nameLen = 128;
+                String name = trimNulls(new String(d, off + OFF_NAME, nameLen, StandardCharsets.UTF_8));
+                
+                int msgLen = readBE16(d, off + OFF_STATUSMSG_LEN);
+                if (msgLen > 1007) msgLen = 1007;
+                String msg = trimNulls(new String(d, off + OFF_STATUSMSG, msgLen, StandardCharsets.UTF_8));
+                
+                int userStatus = d[off + OFF_USERSTATUS] & 0xFF;
+                long lastSeen = readBE64(d, off + OFF_LASTSEEN);
+                
+                det.append("\n--- Confirmed Friend Details ---\n");
+                det.append("Name: \"").append(name.isEmpty() ? "(empty)" : name).append("\"\n");
+                det.append("Status Message: \"").append(msg.isEmpty() ? "(empty)" : msg).append("\"\n");
+                det.append("User Status: ").append(userStatusName(userStatus)).append("\n");
+                det.append("Last Seen: ").append(formatTime(lastSeen)).append("\n");
+                
+                s.subItems.add(makeItem(base + off, FRIEND_SIZE, name.isEmpty() ? ("friend#" + i) : name, PALETTE[i % PALETTE.length], det.toString()));
             } else {
-                int il = readBE16(d, off + OFF_INFO_SIZE);
-                String info = trimNulls(new String(d, off + OFF_INFO, clampLen(il, 1024, d.length - off - OFF_INFO), StandardCharsets.UTF_8));
-                byte[] nospam = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
-                String toxId = computeToxId(pk, nospam);
-                StringBuilder det = new StringBuilder();
-                det.append("Friend #").append(i).append("   [")
-                   .append(status == 1 ? "FRIEND_ADDED" : "FRIEND_REQUESTED").append(" - pending]\n");
-                det.append("Request message: ").append(info.isEmpty() ? "(empty)" : info).append("\n");
-                det.append("Public key:      ").append(hex(pk)).append("\n");
-                det.append("Full Tox ID:     ").append(toxId).append("\n");
-                s.subItems.add(makeItem(base + off, FRIEND_SIZE, "pending#" + i,
-                        new Color(169, 169, 169), det.toString()));
+                s.subItems.add(makeItem(base + off, FRIEND_SIZE, "empty#" + i, Color.GRAY, det.toString()));
             }
         }
         int leftover = d.length % FRIEND_SIZE;
@@ -472,7 +413,16 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    /** GROUPS section: msgpack array of groups (gc_save_pack_group in group_pack.c). */
+    private String getFriendStatusName(int status) {
+        switch (status) {
+            case 0: return "EMPTY / DELETED";
+            case 1: return "OUTGOING REQUEST SENT";
+            case 2: return "INCOMING REQUEST RECEIVED";
+            case 3: return "CONFIRMED (OFFLINE/SAVED)";
+            default: return "UNKNOWN (" + status + ")";
+        }
+    }
+
     private void buildGroupSubItems(Section s) {
         byte[] d = s.data;
         int base = s.offset + 8;
@@ -509,7 +459,6 @@ public class ToxSaveViewer extends JFrame {
         String details = "";
     }
 
-    /** Parses one group entry (array of 7 items) from group_pack.c. */
     private GroupInfo parseOneGroup(MsgPack mp) {
         try {
             if (!mp.readArraySizeFixed(7)) return null;
@@ -517,7 +466,6 @@ public class ToxSaveViewer extends JFrame {
             GroupInfo gi = new GroupInfo();
             StringBuilder det = new StringBuilder();
 
-            // [1] state values: array(8)
             if (!mp.readArraySizeFixed(8)) return null;
             boolean disconnected = mp.readBoolean();
             int nameLen = (int) mp.readUint();
@@ -528,7 +476,6 @@ public class ToxSaveViewer extends JFrame {
             long topicLock = mp.readUint();
             int voice = (int) mp.readUint();
 
-            // [2] state binary: array(5)
             if (!mp.readArraySizeFixed(5)) return null;
             byte[] sig = mp.readBinFixed(64);               
             byte[] founderPk = mp.readBinFixed(64);         
@@ -538,7 +485,6 @@ public class ToxSaveViewer extends JFrame {
 
             gi.name = new String(nameBytes, StandardCharsets.UTF_8);
 
-            // [3] topic info: array(6)
             if (!mp.readArraySizeFixed(6)) return null;
             long topicVersion = mp.readUint();
             int topicLen = (int) mp.readUint();
@@ -549,7 +495,6 @@ public class ToxSaveViewer extends JFrame {
 
             String topicStr = new String(topicBytes, StandardCharsets.UTF_8);
 
-            // [4] mod list: array(2)
             if (!mp.readArraySizeFixed(2)) return null;
             int numMods = (int) mp.readUint();
             byte[] modListBlob = null;
@@ -559,14 +504,12 @@ public class ToxSaveViewer extends JFrame {
                 modListBlob = mp.readBinFixed(numMods * 32);
             }
 
-            // [5] keys: array(4)
             if (!mp.readArraySizeFixed(4)) return null;
             byte[] chatPub = mp.readBinFixed(64);           
             byte[] chatSec = mp.readBinFixed(96);           
             byte[] selfPub = mp.readBinFixed(64);           
             byte[] selfSec = mp.readBinFixed(96);           
 
-            // [6] self info: array(4)
             if (!mp.readArraySizeFixed(4)) return null;
             int nickLen = (int) mp.readUint();
             int selfRole = (int) mp.readUint();
@@ -574,7 +517,6 @@ public class ToxSaveViewer extends JFrame {
             byte[] nickBytes = mp.readBinFixed(nickLen);
             String selfNick = new String(nickBytes, StandardCharsets.UTF_8);
 
-            // [7] saved peers: array(2)
             if (!mp.readArraySizeFixed(2)) return null;
             int savedPeerBytes = (int) mp.readUint();
             byte[] savedPeersBlob = null;
@@ -584,7 +526,6 @@ public class ToxSaveViewer extends JFrame {
                 savedPeersBlob = mp.readBinFixed(savedPeerBytes);
             }
 
-            // --- Build Details String ---
             det.append("Group: \"").append(gi.name).append("\"\n");
             det.append("State:           ").append(disconnected ? "DISCONNECTED" : "CONNECTING/CONNECTED").append("\n");
             det.append("Privacy:         ").append(privacy == 0 ? "PUBLIC" : "PRIVATE").append("\n");
@@ -626,6 +567,98 @@ public class ToxSaveViewer extends JFrame {
         } catch (Exception e) {
             throw new RuntimeException("MsgPack parse error at pos " + mp.getPosition() + ": " + e.getMessage(), e);
         }
+    }
+
+    private String formatIPv6(byte[] b, int off) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 16; i += 2) {
+            if (i > 0) sb.append(":");
+            sb.append(String.format("%02x%02x", b[off+i]&0xFF, b[off+i+1]&0xFF));
+        }
+        return sb.toString();
+    }
+
+    private String parseMods(byte[] blob, int numMods) {
+        if (numMods == 0 || blob == null) return "(none)";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < numMods; i++) {
+            int start = i * 32;
+            if (start + 32 <= blob.length) {
+                sb.append("\n  [Mod ").append(i).append("] Sig PK: ").append(hex(Arrays.copyOfRange(blob, start, start + 32)));
+            }
+        }
+        return sb.toString();
+    }
+
+    private String parseSavedPeers(byte[] blob) {
+        if (blob == null || blob.length == 0) return "(none)";
+        StringBuilder sb = new StringBuilder();
+        int pos = 0;
+        int peerIdx = 0;
+        while (pos < blob.length) {
+            sb.append("\n  [Saved Peer ").append(peerIdx).append("]");
+            boolean hasIp = false;
+            boolean hasTcp = false;
+            
+            if (pos < blob.length) {
+                int fam = blob[pos] & 0xFF;
+                if (fam == 2) {
+                    if (pos + 7 <= blob.length) {
+                        sb.append("\n    UDP: ").append(blob[pos+1]&0xFF).append(".").append(blob[pos+2]&0xFF).append(".").append(blob[pos+3]&0xFF).append(".").append(blob[pos+4]&0xFF);
+                        int port = ((blob[pos+5]&0xFF) << 8) | (blob[pos+6]&0xFF);
+                        sb.append(":").append(port);
+                        pos += 7;
+                        hasIp = true;
+                    }
+                } else if (fam == 10) {
+                    if (pos + 19 <= blob.length) {
+                        sb.append("\n    UDP: [").append(formatIPv6(blob, pos+1)).append("]");
+                        int port = ((blob[pos+17]&0xFF) << 8) | (blob[pos+18]&0xFF);
+                        sb.append(":").append(port);
+                        pos += 19;
+                        hasIp = true;
+                    }
+                }
+            }
+            
+            if (pos < blob.length) {
+                int fam = blob[pos] & 0xFF;
+                if (fam == 2 || fam == 130) {
+                    if (pos + 39 <= blob.length) {
+                        sb.append("\n    TCP: ").append(blob[pos+1]&0xFF).append(".").append(blob[pos+2]&0xFF).append(".").append(blob[pos+3]&0xFF).append(".").append(blob[pos+4]&0xFF);
+                        int port = ((blob[pos+5]&0xFF) << 8) | (blob[pos+6]&0xFF);
+                        sb.append(":").append(port);
+                        sb.append("\n      Relay PK: ").append(hex(Arrays.copyOfRange(blob, pos + 7, pos + 39)));
+                        pos += 39;
+                        hasTcp = true;
+                    }
+                } else if (fam == 10 || fam == 138) {
+                    if (pos + 51 <= blob.length) {
+                        sb.append("\n    TCP: [").append(formatIPv6(blob, pos+1)).append("]");
+                        int port = ((blob[pos+17]&0xFF) << 8) | (blob[pos+18]&0xFF);
+                        sb.append(":").append(port);
+                        sb.append("\n      Relay PK: ").append(hex(Arrays.copyOfRange(blob, pos + 19, pos + 51)));
+                        pos += 51;
+                        hasTcp = true;
+                    }
+                }
+            }
+            
+            if (!hasIp && !hasTcp) {
+                sb.append("\n    (Invalid/Truncated peer data)");
+                break;
+            }
+            
+            if (pos + 32 <= blob.length) {
+                sb.append("\n    Peer PK: ").append(hex(Arrays.copyOfRange(blob, pos, pos + 32)));
+                pos += 32;
+            } else {
+                sb.append("\n    (Truncated PK)");
+                break;
+            }
+            peerIdx++;
+        }
+        return sb.toString();
     }
 
     private String buildDetails(Section s) {
@@ -717,27 +750,39 @@ public class ToxSaveViewer extends JFrame {
             int off = i * FRIEND_SIZE;
             int status = d[off + OFF_STATUS] & 0xFF;
             byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
-            if (status >= 3) {
-                int nl = readBE16(d, off + OFF_NAME_LEN);
-                String name = trimNulls(new String(d, off + OFF_NAME, clampLen(nl, 128, d.length - off - OFF_NAME), StandardCharsets.UTF_8));
-                int sl = readBE16(d, off + OFF_STATUSMSG_LEN);
-                String sm = trimNulls(new String(d, off + OFF_STATUSMSG, clampLen(sl, 1007, d.length - off - OFF_STATUSMSG), StandardCharsets.UTF_8));
-                int us = d[off + OFF_USERSTATUS] & 0xFF;
-                long ls = readBE64(d, off + OFF_LASTSEEN);
-                sb.append("[").append(i).append("] CONFIRMED  name=\"").append(name)
-                  .append("\"  status=").append(userStatusName(us))
-                  .append("  lastSeen=").append(formatTime(ls)).append("\n");
-                sb.append("      msg=\"").append(sm).append("\"\n");
-                sb.append("      pubkey=").append(hex(pk)).append("\n");
-            } else {
-                int il = readBE16(d, off + OFF_INFO_SIZE);
-                String info = trimNulls(new String(d, off + OFF_INFO, clampLen(il, 1024, d.length - off - OFF_INFO), StandardCharsets.UTF_8));
-                byte[] nospam = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
-                sb.append("[").append(i).append("] ").append(status == 1 ? "ADDED" : "REQUESTED")
-                  .append("(pending)  msg=\"").append(info).append("\"\n");
-                sb.append("      pubkey=").append(hex(pk)).append("\n");
-                sb.append("      toxId=").append(computeToxId(pk, nospam)).append("\n");
+            
+            sb.append("========== Friend #").append(i).append(" ==========\n");
+            sb.append("Status: ").append(getFriendStatusName(status)).append("\n");
+            sb.append("Public Key: ").append(hex(pk)).append("\n");
+            
+            if (status == 1 || status == 2) {
+                int infoSize = readBE16(d, off + OFF_INFO_SIZE);
+                if (infoSize > 1024) infoSize = 1024;
+                String info = trimNulls(new String(d, off + OFF_INFO, infoSize, StandardCharsets.UTF_8));
+                long nospam = readLE32(d, off + OFF_NOSPAM);
+                byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
+                
+                sb.append("Request Message: \"").append(info.isEmpty() ? "(empty)" : info).append("\"\n");
+                sb.append("Nospam: 0x").append(String.format("%08X", nospam)).append(" (").append(nospam).append(")\n");
+                sb.append("Derived Tox ID: ").append(computeToxId(pk, nospamBytes)).append("\n");
+            } else if (status == 3) {
+                int nameLen = readBE16(d, off + OFF_NAME_LEN);
+                if (nameLen > 128) nameLen = 128;
+                String name = trimNulls(new String(d, off + OFF_NAME, nameLen, StandardCharsets.UTF_8));
+                
+                int msgLen = readBE16(d, off + OFF_STATUSMSG_LEN);
+                if (msgLen > 1007) msgLen = 1007;
+                String msg = trimNulls(new String(d, off + OFF_STATUSMSG, msgLen, StandardCharsets.UTF_8));
+                
+                int userStatus = d[off + OFF_USERSTATUS] & 0xFF;
+                long lastSeen = readBE64(d, off + OFF_LASTSEEN);
+                
+                sb.append("Name: \"").append(name.isEmpty() ? "(empty)" : name).append("\"\n");
+                sb.append("Status Message: \"").append(msg.isEmpty() ? "(empty)" : msg).append("\"\n");
+                sb.append("User Status: ").append(userStatusName(userStatus)).append("\n");
+                sb.append("Last Seen: ").append(formatTime(lastSeen)).append("\n");
             }
+            sb.append("\n");
         }
         return sb.toString();
     }
@@ -766,99 +811,71 @@ public class ToxSaveViewer extends JFrame {
         return sb.toString();
     }
 
-        private String formatIPv6(byte[] b, int off) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 16; i += 2) {
-            if (i > 0) sb.append(":");
-            sb.append(String.format("%02x%02x", b[off+i]&0xFF, b[off+i+1]&0xFF));
-        }
-        return sb.toString();
-    }
-
-    private String parseMods(byte[] blob, int numMods) {
-        if (numMods == 0 || blob == null) return "(none)";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < numMods; i++) {
-            int start = i * 32;
-            if (start + 32 <= blob.length) {
-                sb.append("\n  [Mod ").append(i).append("] Sig PK: ").append(hex(Arrays.copyOfRange(blob, start, start + 32)));
-            }
-        }
-        return sb.toString();
-    }
-
-    private String parseSavedPeers(byte[] blob) {
-        if (blob == null || blob.length == 0) return "(none)";
-        StringBuilder sb = new StringBuilder();
+    private void buildConferenceSubItems(Section s) {
+        byte[] d = s.data;
+        int base = s.offset + 8;
         int pos = 0;
-        int peerIdx = 0;
-        while (pos < blob.length) {
-            sb.append("\n  [Saved Peer ").append(peerIdx).append("]");
-            boolean hasIp = false;
-            boolean hasTcp = false;
+        int confIdx = 0;
+
+        while (pos < d.length) {
+            int confStart = pos;
+            if (pos + 46 > d.length) break;
+
+            int type = d[pos] & 0xFF; pos += 1;
+            byte[] id = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
+            long msgNum = readLE32(d, pos); pos += 4;
+            int lossyMsgNum = readLE16(d, pos); pos += 2;
+            int peerNum = readLE16(d, pos); pos += 2;
+            long numPeersLong = readLE32(d, pos); pos += 4;
+            int numPeers = (int) numPeersLong;
             
-            // 1. Try direct UDP IP (tcp_enabled = false in C code)
-            if (pos < blob.length) {
-                int fam = blob[pos] & 0xFF;
-                if (fam == 2) { // TOX_AF_INET
-                    if (pos + 7 <= blob.length) {
-                        sb.append("\n    UDP: ").append(blob[pos+1]&0xFF).append(".").append(blob[pos+2]&0xFF).append(".").append(blob[pos+3]&0xFF).append(".").append(blob[pos+4]&0xFF);
-                        int port = ((blob[pos+5]&0xFF) << 8) | (blob[pos+6]&0xFF);
-                        sb.append(":").append(port);
-                        pos += 7;
-                        hasIp = true;
-                    }
-                } else if (fam == 10) { // TOX_AF_INET6
-                    if (pos + 19 <= blob.length) {
-                        sb.append("\n    UDP: [").append(formatIPv6(blob, pos+1)).append("]");
-                        int port = ((blob[pos+17]&0xFF) << 8) | (blob[pos+18]&0xFF);
-                        sb.append(":").append(port);
-                        pos += 19;
-                        hasIp = true;
-                    }
-                }
+            int titleLen = d[pos] & 0xFF; pos += 1;
+            if (pos + titleLen > d.length) break;
+            String title = trimNulls(new String(d, pos, titleLen, StandardCharsets.UTF_8));
+            pos += titleLen;
+
+            StringBuilder det = new StringBuilder();
+            det.append("Conference #").append(confIdx).append("\n");
+            det.append("Type: ").append(type == 0 ? "TEXT" : "AV (Audio/Video)").append(" (").append(type).append(")\n");
+            det.append("ID: ").append(hex(id)).append("\n");
+            det.append("Title: \"").append(title.isEmpty() ? "(empty)" : title).append("\"\n");
+            det.append("Self peer #: ").append(peerNum).append("\n");
+            det.append("Msg #: ").append(msgNum).append("\n");
+            det.append("Peers saved: ").append(numPeers).append("\n");
+
+            boolean parseError = false;
+            for (int p = 0; p < numPeers; p++) {
+                if (pos + 75 > d.length) { parseError = true; break; }
+                byte[] realPk = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
+                pos += 32; // skip tempPk
+                int pNum = readLE16(d, pos); pos += 2;
+                long lastActive = readLE64(d, pos); pos += 8;
+                int nickLen = d[pos] & 0xFF; pos += 1;
+                if (pos + nickLen > d.length) { parseError = true; break; }
+                String nick = trimNulls(new String(d, pos, nickLen, StandardCharsets.UTF_8));
+                pos += nickLen;
+
+                det.append("  [Peer ").append(p).append("] #").append(pNum).append(" \"").append(nick.isEmpty() ? "(empty)" : nick).append("\"\n");
+                det.append("    pubkey: ").append(hex(realPk)).append("\n");
+                det.append("    last_active: ").append(lastActive).append(" (mono_time)\n");
             }
-            
-            // 2. Try TCP Relay (tcp_enabled = true in C code)
-            if (pos < blob.length) {
-                int fam = blob[pos] & 0xFF;
-                if (fam == 2 || fam == 130) { // IPv4 or TOX_TCP_INET
-                    if (pos + 39 <= blob.length) {
-                        sb.append("\n    TCP: ").append(blob[pos+1]&0xFF).append(".").append(blob[pos+2]&0xFF).append(".").append(blob[pos+3]&0xFF).append(".").append(blob[pos+4]&0xFF);
-                        int port = ((blob[pos+5]&0xFF) << 8) | (blob[pos+6]&0xFF);
-                        sb.append(":").append(port);
-                        sb.append("\n      Relay PK: ").append(hex(Arrays.copyOfRange(blob, pos + 7, pos + 39)));
-                        pos += 39;
-                        hasTcp = true;
-                    }
-                } else if (fam == 10 || fam == 138) { // IPv6 or TOX_TCP_INET6
-                    if (pos + 51 <= blob.length) {
-                        sb.append("\n    TCP: [").append(formatIPv6(blob, pos+1)).append("]");
-                        int port = ((blob[pos+17]&0xFF) << 8) | (blob[pos+18]&0xFF);
-                        sb.append(":").append(port);
-                        sb.append("\n      Relay PK: ").append(hex(Arrays.copyOfRange(blob, pos + 19, pos + 51)));
-                        pos += 51;
-                        hasTcp = true;
-                    }
-                }
+
+            if (parseError) {
+                det.append("\n[Parse error: truncated peer data]\n");
             }
-            
-            if (!hasIp && !hasTcp) {
-                sb.append("\n    (Invalid/Truncated peer data)");
-                break;
-            }
-            
-            // 3. Read 32-byte Peer Public Key
-            if (pos + 32 <= blob.length) {
-                sb.append("\n    Peer PK: ").append(hex(Arrays.copyOfRange(blob, pos, pos + 32)));
-                pos += 32;
-            } else {
-                sb.append("\n    (Truncated PK)");
-                break;
-            }
-            peerIdx++;
+
+            int size = pos - confStart;
+            String label = title.isEmpty() ? ("conf#" + confIdx) : title;
+            s.subItems.add(makeItem(base + confStart, size, label, PALETTE[confIdx % PALETTE.length], det.toString()));
+            confIdx++;
         }
-        return sb.toString();
+        
+        if (confIdx == 0 && s.subItems.isEmpty()) {
+            s.subItems.add(makeItem(base, d.length, "empty", s.color, "No connected conferences saved (or empty section)."));
+        } else if (pos < d.length) {
+            s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
+                "Trailing " + (d.length - pos) + " bytes not parsed"));
+        }
     }
 
     private String describeConferences(Section s) {
