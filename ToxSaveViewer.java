@@ -1,6 +1,7 @@
 import javax.swing.*;
 import java.awt.BasicStroke;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.Cursor;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -10,8 +11,6 @@ import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.BorderLayout;
 import java.awt.FlowLayout;
-import java.awt.GridBagLayout;
-import java.awt.GridBagConstraints;
 import java.awt.Toolkit;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -31,6 +30,10 @@ public class ToxSaveViewer extends JFrame {
     //   1.0 = base size, 1.8 = 80% larger, 2.5 = 150% larger, 0.8 = smaller
     // ============================================================
     private static final float GLOBAL_SCALE = 1.8f;
+
+    // Compact heights for the two colour-bar strips (base units, scaled by GLOBAL_SCALE)
+    private static final int MAIN_CHART_HEIGHT = 56;
+    private static final int ZOOM_CHART_HEIGHT = 68;
 
     private static int scale(int base) {
         return Math.round(base * GLOBAL_SCALE);
@@ -74,7 +77,7 @@ public class ToxSaveViewer extends JFrame {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(8)));
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(4)));
         JButton openBtn = new JButton("Open Tox Save File");
         fileLabel = new JLabel("No file loaded");
         topPanel.add(openBtn);
@@ -82,34 +85,30 @@ public class ToxSaveViewer extends JFrame {
 
         chartPanel = new ChartPanel();
         zoomPanel = new ZoomPanel();
-        legendPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(8)));
+        legendPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, scale(8), scale(2)));
 
-        JPanel chartsPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.gridx = 0;
-        gbc.weightx = 1;
-
-        gbc.gridy = 0; gbc.weighty = 0.52; gbc.fill = GridBagConstraints.BOTH;
-        chartsPanel.add(chartPanel, gbc);
-
-        gbc.gridy = 1; gbc.weighty = 0.48; gbc.fill = GridBagConstraints.BOTH;
-        chartsPanel.add(zoomPanel, gbc);
-
-        gbc.gridy = 2; gbc.weighty = 0; gbc.fill = GridBagConstraints.HORIZONTAL;
-        chartsPanel.add(legendPanel, gbc);
+        // Compact top region: buttons + two thin colour bars + legend
+        JPanel northPanel = new JPanel();
+        northPanel.setLayout(new BoxLayout(northPanel, BoxLayout.Y_AXIS));
+        topPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        chartPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        zoomPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        legendPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        northPanel.add(topPanel);
+        northPanel.add(chartPanel);
+        northPanel.add(zoomPanel);
+        northPanel.add(legendPanel);
 
         detailsArea = new JTextArea(18, 100);
         detailsArea.setFont(UIManager.getFont("TextArea.font"));
         detailsArea.setEditable(false);
         JScrollPane scrollPane = new JScrollPane(detailsArea);
         scrollPane.setBorder(BorderFactory.createTitledBorder("Details (hover the bars above, then hover the zoom blocks)"));
-        scrollPane.setPreferredSize(new Dimension(scale(760), scale(230)));
 
-        JPanel mainPanel = new JPanel(new BorderLayout(scale(10), scale(10)));
-        mainPanel.setBorder(BorderFactory.createEmptyBorder(scale(10), scale(10), scale(10), scale(10)));
-        mainPanel.add(topPanel, BorderLayout.NORTH);
-        mainPanel.add(chartsPanel, BorderLayout.CENTER);
-        mainPanel.add(scrollPane, BorderLayout.SOUTH);
+        JPanel mainPanel = new JPanel(new BorderLayout(scale(8), scale(8)));
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(scale(8), scale(8), scale(8), scale(8)));
+        mainPanel.add(northPanel, BorderLayout.NORTH);
+        mainPanel.add(scrollPane, BorderLayout.CENTER);
 
         add(mainPanel);
 
@@ -165,12 +164,8 @@ public class ToxSaveViewer extends JFrame {
             int type = readLE16(b, pos + 4);
             int cookie = readLE16(b, pos + 6);
 
-            if (cookie != 0x01ce) {
-                break;
-            }
-            if (lengthLong < 0 || pos + 8 + lengthLong > b.length) {
-                break;
-            }
+            if (cookie != 0x01ce) break;
+            if (lengthLong < 0 || pos + 8 + lengthLong > b.length) break;
 
             int length = (int) lengthLong;
             Section s = new Section();
@@ -189,10 +184,6 @@ public class ToxSaveViewer extends JFrame {
             pos += 8 + length;
         }
     }
-
-    // ------------------------------------------------------------------
-    //  Selection / linking between chart, zoom and legend
-    // ------------------------------------------------------------------
 
     private void selectSection(Section s) {
         selectedSection = s;
@@ -218,10 +209,6 @@ public class ToxSaveViewer extends JFrame {
         for (Section s : sections) if (s.type == type) return s;
         return null;
     }
-
-    // ------------------------------------------------------------------
-    //  Sub-item construction (the coloured zoom blocks)
-    // ------------------------------------------------------------------
 
     private SubItem makeItem(int offsetInFile, int length, String label, Color color, String details) {
         SubItem it = new SubItem();
@@ -353,10 +340,6 @@ public class ToxSaveViewer extends JFrame {
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    //  Text descriptions per section
-    // ------------------------------------------------------------------
 
     private String buildDetails(Section s) {
         StringBuilder info = new StringBuilder();
@@ -513,10 +496,6 @@ public class ToxSaveViewer extends JFrame {
         return count + " " + label + "(s)\n" + sb.toString();
     }
 
-    // ------------------------------------------------------------------
-    //  Tox ID + helpers
-    // ------------------------------------------------------------------
-
     private String computeToxId(byte[] pub, byte[] nospamBytes) {
         byte[] id = new byte[38];
         System.arraycopy(pub, 0, id, 0, 32);
@@ -601,10 +580,6 @@ public class ToxSaveViewer extends JFrame {
         return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
     }
 
-    private long readBE32(byte[] b, int off) {
-        return ((b[off] & 0xFFL) << 24) | ((b[off + 1] & 0xFFL) << 16) | ((b[off + 2] & 0xFFL) << 8) | (b[off + 3] & 0xFFL);
-    }
-
     private long readBE64(byte[] b, int off) {
         long v = 0;
         for (int i = 0; i < 8; i++) v = (v << 8) | (b[off + i] & 0xFF);
@@ -686,10 +661,6 @@ public class ToxSaveViewer extends JFrame {
         return sb.toString();
     }
 
-    // ------------------------------------------------------------------
-    //  Model classes
-    // ------------------------------------------------------------------
-
     class Section {
         int offset;
         int length;
@@ -740,20 +711,18 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    // ------------------------------------------------------------------
-    //  Top chart: one bar per section
-    // ------------------------------------------------------------------
-
     class ChartPanel extends JPanel {
         List<Section> sections;
         byte[] fileData;
-        private final int pad = scale(20);
+        private final int pad = scale(6);
         private int highlightType = -1;
         private Section lastHovered;
 
         public ChartPanel() {
             setBackground(Color.LIGHT_GRAY);
-            setPreferredSize(new Dimension(scale(700), scale(180)));
+            int h = scale(MAIN_CHART_HEIGHT);
+            setPreferredSize(new Dimension(scale(700), h));
+            setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
             MouseAdapter ma = new MouseAdapter() {
                 @Override
                 public void mouseMoved(MouseEvent e) { handleMouseMove(e.getX(), e.getY()); }
@@ -815,6 +784,7 @@ public class ToxSaveViewer extends JFrame {
 
             double pixelScale = availableWidth / (double) fileData.length;
             boolean highlighting = highlightType >= 0;
+            FontMetrics fm = g2d.getFontMetrics();
 
             for (Section s : sections) {
                 int x = pad + (int) (s.offset * pixelScale);
@@ -831,8 +801,7 @@ public class ToxSaveViewer extends JFrame {
                 g2d.setColor(dim ? Color.GRAY : Color.BLACK);
                 g2d.drawRect(x, pad, w, availableHeight);
 
-                FontMetrics fm = g2d.getFontMetrics();
-                if (!dim && w > fm.stringWidth(s.typeName) + 10) {
+                if (!dim && availableHeight > fm.getHeight() && w > fm.stringWidth(s.typeName) + 10) {
                     g2d.setColor(Color.BLACK);
                     int textY = pad + (availableHeight + fm.getAscent() - fm.getDescent()) / 2;
                     g2d.drawString(s.typeName, x + 5, textY);
@@ -848,10 +817,6 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
-    // ------------------------------------------------------------------
-    //  Zoom chart: sub-blocks of the selected section
-    // ------------------------------------------------------------------
-
     class ZoomPanel extends JPanel {
         Section section;
         List<SubItem> items;
@@ -859,7 +824,9 @@ public class ToxSaveViewer extends JFrame {
 
         public ZoomPanel() {
             setBackground(new Color(245, 245, 245));
-            setPreferredSize(new Dimension(scale(700), scale(150)));
+            int h = scale(ZOOM_CHART_HEIGHT);
+            setPreferredSize(new Dimension(scale(700), h));
+            setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
             MouseAdapter ma = new MouseAdapter() {
                 @Override
                 public void mouseMoved(MouseEvent e) { handleZoomMouse(e.getX(), e.getY()); }
@@ -886,9 +853,9 @@ public class ToxSaveViewer extends JFrame {
             repaint();
         }
 
-        private int zoomPad() { return scale(15); }
-        private int zoomTopY() { return zoomPad() + scale(18); }
-        private int zoomBarH() { return Math.max(getHeight() - zoomTopY() - zoomPad(), scale(24)); }
+        private int zoomPad() { return scale(6); }
+        private int zoomTopY() { return zoomPad() + scale(20); }
+        private int zoomBarH() { return Math.max(getHeight() - zoomTopY() - zoomPad(), scale(16)); }
 
         private void handleZoomMouse(int mx, int my) {
             if (items == null || items.isEmpty()) {
@@ -931,15 +898,16 @@ public class ToxSaveViewer extends JFrame {
             g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
             int pad = zoomPad();
+            FontMetrics fm = g2d.getFontMetrics();
             g2d.setColor(Color.DARK_GRAY);
 
             if (section == null) {
-                g2d.drawString("Zoom: hover a section bar above to inspect its contents", pad, getHeight() / 2);
+                g2d.drawString("Zoom: hover a section bar above to inspect its contents", pad, pad + fm.getAscent());
                 return;
             }
 
             g2d.drawString("Zoom: " + section.typeName + "  (" + section.length + " bytes, " +
-                    (items == null ? 0 : items.size()) + " parts)", pad, pad + scale(4));
+                    (items == null ? 0 : items.size()) + " parts)", pad, pad + fm.getAscent());
 
             if (items == null || items.isEmpty()) return;
 
@@ -973,8 +941,7 @@ public class ToxSaveViewer extends JFrame {
                     g2d.drawRect(x, topY, w, barH);
                 }
 
-                FontMetrics fm = g2d.getFontMetrics();
-                if (w > fm.stringWidth(it.label) + 8) {
+                if (barH > fm.getHeight() && w > fm.stringWidth(it.label) + 8) {
                     g2d.setColor(Color.BLACK);
                     int ty = topY + (barH + fm.getAscent() - fm.getDescent()) / 2;
                     g2d.drawString(it.label, x + 4, ty);
