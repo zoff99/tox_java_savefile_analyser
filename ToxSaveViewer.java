@@ -1,10 +1,15 @@
 import javax.swing.*;
 import java.awt.Color;
+import java.awt.Cursor;
 import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.BorderLayout;
 import java.awt.FlowLayout;
+import java.awt.Toolkit;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.*;
@@ -24,7 +29,7 @@ public class ToxSaveViewer extends JFrame {
 
     public ToxSaveViewer() {
         setTitle("Tox Save File Viewer");
-        setSize(900, 700);
+        setSize(1200, 900);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
@@ -43,7 +48,7 @@ public class ToxSaveViewer extends JFrame {
         centerPanel.add(legendPanel, BorderLayout.SOUTH);
 
         detailsArea = new JTextArea(15, 80);
-        detailsArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        detailsArea.setFont(UIManager.getFont("TextArea.font"));
         detailsArea.setEditable(false);
         JScrollPane scrollPane = new JScrollPane(detailsArea);
         scrollPane.setBorder(BorderFactory.createTitledBorder("Section Details (Hover or click a bar)"));
@@ -91,10 +96,10 @@ public class ToxSaveViewer extends JFrame {
             throw new RuntimeException("File too small");
         }
 
-        int magic1 = readLE32(b, 0);
-        int magic2 = readLE32(b, 4);
+        long magic1 = readLE32(b, 0);
+        long magic2 = readLE32(b, 4);
 
-        if (magic1 != 0 || magic2 != 0x15ed1b1f) {
+        if (magic1 != 0 || magic2 != 0x15ed1b1fL) {
             String mHex = String.format("%02X %02X %02X %02X %02X %02X %02X %02X",
                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
             throw new RuntimeException("Invalid header. File is either encrypted or not a Tox save file.\n" +
@@ -104,7 +109,7 @@ public class ToxSaveViewer extends JFrame {
 
         int pos = 8;
         while (pos + 8 <= b.length) {
-            int length = readLE32(b, pos);
+            long lengthLong = readLE32(b, pos);
             int type = readLE16(b, pos + 4);
             int cookie = readLE16(b, pos + 6);
 
@@ -113,10 +118,12 @@ public class ToxSaveViewer extends JFrame {
                 break;
             }
 
-            if (length < 0 || pos + 8 + length > b.length) {
-                System.err.println("Warning: Truncated section at offset " + pos);
+            if (lengthLong < 0 || pos + 8 + lengthLong > b.length) {
+                System.err.println("Warning: Truncated or invalid section at offset " + pos);
                 break;
             }
+
+            int length = (int) lengthLong;
 
             Section s = new Section();
             s.offset = pos;
@@ -140,8 +147,8 @@ public class ToxSaveViewer extends JFrame {
         return (b[off] & 0xFF) | ((b[off+1] & 0xFF) << 8);
     }
 
-    private int readLE32(byte[] b, int off) {
-        return (b[off] & 0xFF) | ((b[off+1] & 0xFF) << 8) | ((b[off+2] & 0xFF) << 16) | ((b[off+3] & 0xFF) << 24);
+    private long readLE32(byte[] b, int off) {
+        return (b[off] & 0xFFL) | ((b[off+1] & 0xFFL) << 8) | ((b[off+2] & 0xFFL) << 16) | ((b[off+3] & 0xFFL) << 24);
     }
 
     private void updateLegend() {
@@ -242,7 +249,7 @@ public class ToxSaveViewer extends JFrame {
 
         public ChartPanel() {
             setBackground(Color.LIGHT_GRAY);
-            setPreferredSize(new Dimension(800, 150));
+            setPreferredSize(new Dimension(1000, 300));
 
             MouseAdapter ma = new MouseAdapter() {
                 @Override
@@ -267,14 +274,17 @@ public class ToxSaveViewer extends JFrame {
         private void handleMouseMove(int mx, int my) {
             Section hovered = null;
             if (sections != null) {
+                int padding = 20;
+                int availableHeight = getHeight() - padding * 2;
                 for (Section s : sections) {
-                    if (mx >= s.x && mx < s.x + s.w && my >= 10 && my < 110) {
+                    if (mx >= s.x && mx < s.x + s.w && my >= padding && my < padding + availableHeight) {
                         hovered = s;
                         break;
                     }
                 }
             }
             if (hovered != null) {
+                setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
                 StringBuilder info = new StringBuilder();
                 info.append("Type: ").append(hovered.typeName).append(" (").append(hovered.type).append(")\n");
                 info.append("Offset: ").append(hovered.offset).append(" bytes\n");
@@ -297,6 +307,8 @@ public class ToxSaveViewer extends JFrame {
                 info.append(getHexDump(hovered.data));
                 detailsArea.setText(info.toString());
                 detailsArea.setCaretPosition(0);
+            } else {
+                setCursor(Cursor.getDefaultCursor());
             }
         }
 
@@ -305,25 +317,37 @@ public class ToxSaveViewer extends JFrame {
             super.paintComponent(g);
             if (fileData == null || fileData.length == 0) return;
 
-            double scale = getWidth() / (double) fileData.length;
+            Graphics2D g2d = (Graphics2D) g;
+            g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+            int padding = 20;
+            int availableWidth = getWidth() - padding * 2;
+            int availableHeight = getHeight() - padding * 2;
+
+            if (availableWidth <= 0 || availableHeight <= 0) return;
+
+            double pixelScale = availableWidth / (double) fileData.length;
 
             for (Section s : sections) {
-                int x = (int) (s.offset * scale);
-                int w = (int) ((s.length + 8) * scale);
+                int x = padding + (int) (s.offset * pixelScale);
+                int w = (int) ((s.length + 8) * pixelScale);
                 if (w == 0 && (s.length + 8) > 0) w = 1;
 
                 s.x = x;
                 s.w = w;
 
-                g.setColor(s.color);
-                g.fillRect(x, 10, w, 100);
+                g2d.setColor(s.color);
+                g2d.fillRect(x, padding, w, availableHeight);
 
-                g.setColor(Color.BLACK);
-                g.drawRect(x, 10, w, 100);
+                g2d.setColor(Color.BLACK);
+                g2d.drawRect(x, padding, w, availableHeight);
 
-                if (w > g.getFontMetrics().stringWidth(s.typeName) + 10) {
-                    g.setColor(Color.BLACK);
-                    g.drawString(s.typeName, x + 5, 60);
+                FontMetrics fm = g2d.getFontMetrics();
+                if (w > fm.stringWidth(s.typeName) + 10) {
+                    g2d.setColor(Color.BLACK);
+                    int textY = padding + (availableHeight + fm.getAscent() - fm.getDescent()) / 2;
+                    g2d.drawString(s.typeName, x + 5, textY);
                 }
             }
         }
@@ -333,6 +357,23 @@ public class ToxSaveViewer extends JFrame {
         SwingUtilities.invokeLater(() -> {
             try {
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+                
+                // Dynamically scale UI elements for High DPI / OS Zoom settings
+                int screenRes = Toolkit.getDefaultToolkit().getScreenResolution();
+                float scale = Math.max(1.25f, screenRes / 96.0f); 
+                
+                Font defaultFont = new Font(Font.SANS_SERIF, Font.PLAIN, 14);
+                Font monoFont = new Font(Font.MONOSPACED, Font.PLAIN, 14);
+                
+                Font scaledDefault = defaultFont.deriveFont(defaultFont.getSize2D() * scale);
+                Font scaledMono = monoFont.deriveFont(monoFont.getSize2D() * scale);
+                
+                UIManager.put("Label.font", scaledDefault);
+                UIManager.put("Button.font", scaledDefault);
+                UIManager.put("Panel.font", scaledDefault);
+                UIManager.put("TextArea.font", scaledMono);
+                UIManager.put("TitledBorder.font", scaledDefault);
+                
             } catch (Exception e) {
                 e.printStackTrace();
             }
