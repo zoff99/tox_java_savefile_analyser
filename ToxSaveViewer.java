@@ -239,7 +239,7 @@ public class ToxSaveViewer extends JFrame {
             case 7: buildGroupSubItems(s); break;
             case 10: buildNodeSubItems(s, "TCP relay", false); break;
             case 11: buildNodeSubItems(s, "Path node", false); break;
-            case 20: s.subItems.add(makeItem(base, d.length, "conferences", s.color, describeConferences(s))); break;
+            case 20: buildConferenceSubItems(s); break;
             case 255: s.subItems.add(makeItem(base, 0, "end", Color.BLACK, "End-of-save marker (no payload)")); break;
             default: s.subItems.add(makeItem(base, d.length, "data", Color.WHITE, "(unknown section)")); break;
         }
@@ -301,6 +301,78 @@ public class ToxSaveViewer extends JFrame {
         if (pos < d.length) {
             s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
                 "Trailing " + (d.length - pos) + " bytes not parsed"));
+        }
+    }
+
+    /** CONFERENCES section: raw binary packed structs (group.c) */
+    private void buildConferenceSubItems(Section s) {
+        byte[] d = s.data;
+        int base = s.offset + 8;
+        int pos = 0;
+        int confIdx = 0;
+
+        while (pos < d.length) {
+            int confStart = pos;
+            // Minimum header size: 1 (type) + 32 (id) + 4 (msg) + 2 (lossy) + 2 (peer) + 4 (num) + 1 (title_len) = 46
+            if (pos + 46 > d.length) break; 
+
+            int type = d[pos] & 0xFF; pos += 1;
+            byte[] id = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
+            long msgNum = readLE32(d, pos); pos += 4;
+            int lossyMsgNum = readLE16(d, pos); pos += 2;
+            int peerNum = readLE16(d, pos); pos += 2;
+            long numPeersLong = readLE32(d, pos); pos += 4;
+            int numPeers = (int) numPeersLong;
+            
+            int titleLen = d[pos] & 0xFF; pos += 1;
+            if (pos + titleLen > d.length) break;
+            String title = trimNulls(new String(d, pos, titleLen, StandardCharsets.UTF_8));
+            pos += titleLen;
+
+            StringBuilder det = new StringBuilder();
+            det.append("Conference #").append(confIdx).append("\n");
+            det.append("Type: ").append(type == 0 ? "TEXT" : "AV (Audio/Video)").append(" (").append(type).append(")\n");
+            det.append("ID: ").append(hex(id)).append("\n");
+            det.append("Title: \"").append(title).append("\"\n");
+            det.append("Self peer #: ").append(peerNum).append("\n");
+            det.append("Msg #: ").append(msgNum).append("\n");
+            det.append("Peers saved: ").append(numPeers).append("\n\n");
+
+            boolean parseError = false;
+            for (int p = 0; p < numPeers; p++) {
+                // Peer size: 32 (real) + 32 (temp) + 2 (peer_num) + 8 (last_active) + 1 (nick_len) = 75
+                if (pos + 75 > d.length) { parseError = true; break; }
+                byte[] realPk = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
+                byte[] tempPk = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
+                int pNum = readLE16(d, pos); pos += 2;
+                long lastActive = readLE64(d, pos); pos += 8;
+                int nickLen = d[pos] & 0xFF; pos += 1;
+                if (pos + nickLen > d.length) { parseError = true; break; }
+                String nick = trimNulls(new String(d, pos, nickLen, StandardCharsets.UTF_8));
+                pos += nickLen;
+
+                det.append("  [Peer ").append(p).append("] #").append(pNum).append(" \"").append(nick).append("\"\n");
+                det.append("    real_pk: ").append(hex(realPk)).append("\n");
+                det.append("    last_active: ").append(lastActive).append(" (mono_time)\n");
+            }
+
+            if (parseError) {
+                det.append("\n[Parse error: truncated peer data]\n");
+            }
+
+            int size = pos - confStart;
+            String label = title.isEmpty() ? ("conf#" + confIdx) : title;
+            s.subItems.add(makeItem(base + confStart, size, label, PALETTE[confIdx % PALETTE.length], det.toString()));
+            confIdx++;
+        }
+        
+        if (pos < d.length) {
+            s.subItems.add(makeItem(base + pos, d.length - pos, "tail", Color.GRAY,
+                "Trailing " + (d.length - pos) + " bytes not parsed"));
+        }
+        
+        if (confIdx == 0 && s.subItems.isEmpty()) {
+            s.subItems.add(makeItem(base, d.length, "empty", s.color, "No connected conferences saved."));
         }
     }
 
@@ -675,8 +747,66 @@ public class ToxSaveViewer extends JFrame {
     }
 
     private String describeConferences(Section s) {
-        return "Conferences (classic audio/text) (" + s.length + " bytes).\n" +
-               "Saved conference state (conference.c format). See raw hex dump below.";
+        byte[] d = s.data;
+        StringBuilder sb = new StringBuilder();
+        int pos = 0;
+        int confIdx = 0;
+
+        while (pos < d.length) {
+            if (pos + 46 > d.length) break;
+
+            int type = d[pos] & 0xFF; pos += 1;
+            byte[] id = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
+            long msgNum = readLE32(d, pos); pos += 4;
+            int lossyMsgNum = readLE16(d, pos); pos += 2;
+            int peerNum = readLE16(d, pos); pos += 2;
+            long numPeersLong = readLE32(d, pos); pos += 4;
+            int numPeers = (int) numPeersLong;
+            
+            int titleLen = d[pos] & 0xFF; pos += 1;
+            if (pos + titleLen > d.length) break;
+            String title = trimNulls(new String(d, pos, titleLen, StandardCharsets.UTF_8));
+            pos += titleLen;
+
+            sb.append("########## Conference ").append(confIdx).append(" ##########\n");
+            sb.append("Type: ").append(type == 0 ? "TEXT" : "AV (Audio/Video)").append(" (").append(type).append(")\n");
+            sb.append("ID: ").append(hex(id)).append("\n");
+            sb.append("Title: \"").append(title).append("\"\n");
+            sb.append("Self peer #: ").append(peerNum).append("\n");
+            sb.append("Msg #: ").append(msgNum).append("\n");
+            sb.append("Peers saved: ").append(numPeers).append("\n");
+
+            boolean parseError = false;
+            for (int p = 0; p < numPeers; p++) {
+                if (pos + 75 > d.length) { parseError = true; break; }
+                byte[] realPk = Arrays.copyOfRange(d, pos, pos + 32); pos += 32;
+                pos += 32; // skip tempPk
+                int pNum = readLE16(d, pos); pos += 2;
+                long lastActive = readLE64(d, pos); pos += 8;
+                int nickLen = d[pos] & 0xFF; pos += 1;
+                if (pos + nickLen > d.length) { parseError = true; break; }
+                String nick = trimNulls(new String(d, pos, nickLen, StandardCharsets.UTF_8));
+                pos += nickLen;
+
+                sb.append("  [Peer ").append(p).append("] #").append(pNum).append(" \"").append(nick).append("\"\n");
+                sb.append("    pubkey: ").append(hex(realPk)).append("\n");
+                sb.append("    last_active: ").append(lastActive).append(" (mono_time)\n");
+            }
+
+            if (parseError) {
+                sb.append("\n[Parse error: truncated peer data]\n");
+                break;
+            }
+            sb.append("\n");
+            confIdx++;
+        }
+        
+        if (confIdx == 0) {
+            sb.append("No connected conferences saved (or empty section).\n");
+        } else {
+            sb.append("Total conferences saved: ").append(confIdx).append("\n");
+        }
+        return sb.toString();
     }
 
     private String describeNospamKeys(byte[] d) {
@@ -835,6 +965,14 @@ public class ToxSaveViewer extends JFrame {
 
     private long readLE32(byte[] b, int off) {
         return (b[off] & 0xFFL) | ((b[off + 1] & 0xFFL) << 8) | ((b[off + 2] & 0xFFL) << 16) | ((b[off + 3] & 0xFFL) << 24);
+    }
+
+    private long readLE64(byte[] b, int off) {
+        long v = 0;
+        for (int i = 0; i < 8; i++) {
+            v |= ((long)(b[off + i] & 0xFF)) << (8 * i);
+        }
+        return v;
     }
 
     private int readBE16(byte[] b, int off) {
