@@ -14,6 +14,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.*;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.nio.charset.StandardCharsets;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -22,10 +23,7 @@ public class ToxSaveViewer extends JFrame {
 
     // ============================================================
     // Change this single value to make the entire UI larger or smaller.
-    //   1.0 = base size
-    //   1.8 = 80% larger (current default)
-    //   2.5 = 150% larger
-    //   0.8 = 20% smaller
+    //   1.0 = base size, 1.8 = 80% larger, 2.5 = 150% larger, 0.8 = smaller
     // ============================================================
     private static final float GLOBAL_SCALE = 1.8f;
 
@@ -60,7 +58,7 @@ public class ToxSaveViewer extends JFrame {
         centerPanel.add(chartPanel, BorderLayout.CENTER);
         centerPanel.add(legendPanel, BorderLayout.SOUTH);
 
-        detailsArea = new JTextArea(18, 100);
+        detailsArea = new JTextArea(20, 100);
         detailsArea.setFont(UIManager.getFont("TextArea.font"));
         detailsArea.setEditable(false);
         JScrollPane scrollPane = new JScrollPane(detailsArea);
@@ -92,7 +90,7 @@ public class ToxSaveViewer extends JFrame {
                 buffer.write(data, 0, nRead);
             }
             fileData = buffer.toByteArray();
-            
+
             parseData(fileData);
             fileLabel.setText(f.getName() + " (" + fileData.length + " bytes)");
             chartPanel.setData(fileData, sections);
@@ -156,12 +154,183 @@ public class ToxSaveViewer extends JFrame {
         }
     }
 
+    // ------------------------------------------------------------------
+    //  Detailed content decoding per section type
+    // ------------------------------------------------------------------
+
+    private String buildDetails(Section s) {
+        StringBuilder info = new StringBuilder();
+        info.append("Type: ").append(s.typeName).append(" (").append(s.type).append(")\n");
+        info.append("Offset: ").append(s.offset).append(" bytes\n");
+        info.append("Data Size: ").append(s.length).append(" bytes\n");
+        info.append("Total Size: ").append(s.length + 8).append(" bytes\n");
+        info.append("\n========== PARSED CONTENT ==========\n");
+        info.append(describeSection(s));
+        info.append("\n========== RAW HEX DUMP ==========\n");
+        info.append(getHexDump(s.data));
+        return info.toString();
+    }
+
+    private String describeSection(Section s) {
+        byte[] d = s.data;
+        switch (s.type) {
+            case 1:  return describeNospamKeys(d);
+            case 2:  return describeNodeList(d, "DHT node");
+            case 3:  return describeFriends(d);
+            case 4:  return describeText(d, "Self name");
+            case 5:  return describeText(d, "Status message");
+            case 6:  return describeUserStatus(d);
+            case 7:  return describeGroups(d);
+            case 10: return describeNodeList(d, "TCP relay");
+            case 11: return describeNodeList(d, "Path node");
+            case 20: return describeConferences(d);
+            case 255: return "(End-of-save marker, no payload)";
+            default: return "(Unknown section type)";
+        }
+    }
+
+    private String describeText(byte[] d, String label) {
+        if (d.length == 0) return label + ": (empty)";
+        String text = new String(d, StandardCharsets.UTF_8);
+        return label + ": \"" + text + "\"\n(" + d.length + " UTF-8 bytes)";
+    }
+
+    private String describeUserStatus(byte[] d) {
+        if (d.length < 1) return "(empty)";
+        int st = d[0] & 0xFF;
+        String name;
+        switch (st) {
+            case 0:  name = "NONE (appears Online)"; break;
+            case 1:  name = "AWAY"; break;
+            case 2:  name = "BUSY"; break;
+            default: name = "Unknown (" + st + ")"; break;
+        }
+        return "User status: " + name;
+    }
+
+    private String describeNospamKeys(byte[] d) {
+        if (d.length < 68) {
+            return "(Expected at least 68 bytes for keys, got " + d.length + ")\n";
+        }
+        long nospam = readLE32(d, 0);
+        byte[] nospamBytes = Arrays.copyOfRange(d, 0, 4);
+        byte[] pub = Arrays.copyOfRange(d, 4, 36);
+        byte[] sec = Arrays.copyOfRange(d, 36, 68);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Nospam:      0x").append(String.format("%08X", nospam))
+          .append("   (decimal ").append(nospam).append(")\n");
+        sb.append("Public key:  ").append(hex(pub)).append("\n");
+        sb.append("Secret key:  ").append(hex(sec)).append("   <-- sensitive\n");
+        sb.append("\nDerived Tox ID:\n  ").append(computeToxId(pub, nospamBytes)).append("\n");
+        if (d.length > 68) {
+            sb.append("\n(").append(d.length - 68).append(" extra bytes beyond standard keys)\n");
+        }
+        return sb.toString();
+    }
+
+    private String computeToxId(byte[] pub, byte[] nospamBytes) {
+        byte[] id = new byte[38];
+        System.arraycopy(pub, 0, id, 0, 32);
+        System.arraycopy(nospamBytes, 0, id, 32, 4);
+        int checksum = checksum16(id, 36);
+        id[36] = (byte) (checksum & 0xFF);
+        id[37] = (byte) ((checksum >> 8) & 0xFF);
+        return hex(id);
+    }
+
+    private int checksum16(byte[] data, int len) {
+        int checksum = 0;
+        for (int i = 0; i + 1 < len; i += 2) {
+            int value = (data[i] & 0xFF) | ((data[i + 1] & 0xFF) << 8);
+            checksum ^= value;
+        }
+        return checksum & 0xFFFF;
+    }
+
+    private String describeNodeList(byte[] d, String label) {
+        int pos = 0;
+        List<String> nodes = new ArrayList<>();
+        while (pos < d.length) {
+            int family = d[pos] & 0xFF;
+            if (family == 2 && pos + 39 <= d.length) {
+                // IPv4: 1 family + 4 ip + 2 port + 32 key = 39
+                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 5);
+                int port = ((d[pos + 5] & 0xFF) << 8) | (d[pos + 6] & 0xFF);
+                byte[] key = Arrays.copyOfRange(d, pos + 7, pos + 39);
+                nodes.add(formatIpv4(ip) + ":" + port + "   key=" + hex(key));
+                pos += 39;
+            } else if (isIpv6Family(family) && pos + 51 <= d.length) {
+                // IPv6: 1 family + 16 ip + 2 port + 32 key = 51
+                byte[] ip = Arrays.copyOfRange(d, pos + 1, pos + 17);
+                int port = ((d[pos + 17] & 0xFF) << 8) | (d[pos + 18] & 0xFF);
+                byte[] key = Arrays.copyOfRange(d, pos + 19, pos + 51);
+                nodes.add(formatIpv6(ip) + ":" + port + "   key=" + hex(key));
+                pos += 51;
+            } else {
+                break;
+            }
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(nodes.size()).append(" ").append(label).append("(s) saved\n");
+        for (int i = 0; i < nodes.size(); i++) {
+            sb.append("  [").append(i).append("] ").append(nodes.get(i)).append("\n");
+        }
+        if (pos < d.length) {
+            sb.append("(Note: ").append(d.length - pos).append(" trailing bytes not parsed as nodes)\n");
+        }
+        return sb.toString();
+    }
+
+    private boolean isIpv6Family(int family) {
+        return family == 10 || family == 23 || family == 28 || family == 30;
+    }
+
+    private String formatIpv4(byte[] ip) {
+        return (ip[0] & 0xFF) + "." + (ip[1] & 0xFF) + "." + (ip[2] & 0xFF) + "." + (ip[3] & 0xFF);
+    }
+
+    private String formatIpv6(byte[] ip) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 16; i += 2) {
+            if (i > 0) sb.append(":");
+            sb.append(String.format("%02x%02x", ip[i], ip[i + 1]));
+        }
+        return "[" + sb + "]";
+    }
+
+    private String describeFriends(byte[] d) {
+        return "Friend list (" + d.length + " bytes).\n" +
+               "Contains one record per friend: status, public key, name, status message,\n" +
+               "user status, DHT node cache, and file-transfer state. This is a nested\n" +
+               "binary structure; see the raw hex dump below for the full data.";
+    }
+
+    private String describeGroups(byte[] d) {
+        return "Group chats (" + d.length + " bytes).\n" +
+               "Stores saved group/conference membership and state. Nested binary\n" +
+               "structure; see raw hex dump below.";
+    }
+
+    private String describeConferences(byte[] d) {
+        return "Conferences (" + d.length + " bytes).\n" +
+               "Stores saved audio/text conference state. Nested binary structure;\n" +
+               "see raw hex dump below.";
+    }
+
+    private String hex(byte[] data) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : data) sb.append(String.format("%02X", b));
+        return sb.toString();
+    }
+
     private int readLE16(byte[] b, int off) {
-        return (b[off] & 0xFF) | ((b[off+1] & 0xFF) << 8);
+        return (b[off] & 0xFF) | ((b[off + 1] & 0xFF) << 8);
     }
 
     private long readLE32(byte[] b, int off) {
-        return (b[off] & 0xFFL) | ((b[off+1] & 0xFFL) << 8) | ((b[off+2] & 0xFFL) << 16) | ((b[off+3] & 0xFFL) << 24);
+        return (b[off] & 0xFFL) | ((b[off + 1] & 0xFFL) << 8) | ((b[off + 2] & 0xFFL) << 16) | ((b[off + 3] & 0xFFL) << 24);
     }
 
     private void updateLegend() {
@@ -185,13 +354,13 @@ public class ToxSaveViewer extends JFrame {
     }
 
     private String getHexDump(byte[] data) {
-        if (data == null || data.length == 0) return "Empty data\n";
+        if (data == null || data.length == 0) return "(empty)\n";
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < data.length; i += 16) {
             sb.append(String.format("%08X: ", i));
             for (int j = 0; j < 16; j++) {
                 if (i + j < data.length) {
-                    sb.append(String.format("%02X ", data[i+j] & 0xFF));
+                    sb.append(String.format("%02X ", data[i + j] & 0xFF));
                 } else {
                     sb.append("   ");
                 }
@@ -199,15 +368,15 @@ public class ToxSaveViewer extends JFrame {
             sb.append(" ");
             for (int j = 0; j < 16; j++) {
                 if (i + j < data.length) {
-                    int c = data[i+j] & 0xFF;
-                    sb.append((c >= 32 && c < 127) ? (char)c : '.');
+                    int c = data[i + j] & 0xFF;
+                    sb.append((c >= 32 && c < 127) ? (char) c : '.');
                 } else {
                     sb.append(" ");
                 }
             }
             sb.append("\n");
             if (i > 512) {
-                sb.append("... (truncated)\n");
+                sb.append("... (hex dump truncated, parsed content above is complete)\n");
                 break;
             }
         }
@@ -298,27 +467,7 @@ public class ToxSaveViewer extends JFrame {
             }
             if (hovered != null) {
                 setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-                StringBuilder info = new StringBuilder();
-                info.append("Type: ").append(hovered.typeName).append(" (").append(hovered.type).append(")\n");
-                info.append("Offset: ").append(hovered.offset).append(" bytes\n");
-                info.append("Data Size: ").append(hovered.length).append(" bytes\n");
-                info.append("Total Size: ").append(hovered.length + 8).append(" bytes\n\n");
-
-                boolean isAscii = true;
-                for (byte b : hovered.data) {
-                    int c = b & 0xFF;
-                    if (c < 32 && c != 9 && c != 10 && c != 13) {
-                        isAscii = false;
-                        break;
-                    }
-                }
-                if (isAscii && hovered.data.length > 0 && hovered.data.length < 1024) {
-                    info.append("String Content: ").append(new String(hovered.data, StandardCharsets.UTF_8)).append("\n\n");
-                }
-
-                info.append("Content Preview (Hex/Ascii):\n");
-                info.append(getHexDump(hovered.data));
-                detailsArea.setText(info.toString());
+                detailsArea.setText(buildDetails(hovered));
                 detailsArea.setCaretPosition(0);
             } else {
                 setCursor(Cursor.getDefaultCursor());
@@ -369,29 +518,26 @@ public class ToxSaveViewer extends JFrame {
         SwingUtilities.invokeLater(() -> {
             try {
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-                
-                // Dynamically scale UI elements for High DPI / OS Zoom settings,
-                // then apply the user-adjustable GLOBAL_SCALE on top.
+
                 int screenRes = Toolkit.getDefaultToolkit().getScreenResolution();
                 float dpiScale = Math.max(1.0f, screenRes / 96.0f);
                 float fontScale = dpiScale * GLOBAL_SCALE;
 
                 Font scaledDefault = new Font(Font.SANS_SERIF, Font.PLAIN, 14).deriveFont(14f * fontScale);
                 Font scaledMono = new Font(Font.MONOSPACED, Font.PLAIN, 14).deriveFont(14f * fontScale);
-                
+
                 UIManager.put("Label.font", scaledDefault);
                 UIManager.put("Button.font", scaledDefault);
                 UIManager.put("Panel.font", scaledDefault);
                 UIManager.put("TextArea.font", scaledMono);
                 UIManager.put("TitledBorder.font", scaledDefault);
-                
+
             } catch (Exception e) {
                 e.printStackTrace();
             }
-            
+
             ToxSaveViewer viewer = new ToxSaveViewer();
-            
-            // If a file path is provided via command line, open it directly
+
             if (args.length > 0) {
                 File fileToOpen = new File(args[0]);
                 if (fileToOpen.exists() && fileToOpen.isFile()) {
@@ -400,7 +546,7 @@ public class ToxSaveViewer extends JFrame {
                     System.err.println("Specified file does not exist: " + args[0]);
                 }
             }
-            
+
             viewer.setVisible(true);
         });
     }
