@@ -377,7 +377,20 @@ public class ToxSaveViewer extends JFrame {
             } catch (Exception e) {
                 e.printStackTrace();
             }
-            new ToxSaveViewer().setVisible(true);
+            
+            ToxSaveViewer viewer = new ToxSaveViewer();
+            
+            // If a file path is provided via command line, open it directly
+            if (args.length > 0) {
+                File fileToOpen = new File(args[0]);
+                if (fileToOpen.exists() && fileToOpen.isFile()) {
+                    viewer.loadFile(fileToOpen);
+                } else {
+                    System.err.println("Specified file does not exist: " + args[0]);
+                }
+            }
+            
+            viewer.setVisible(true);
         });
     }
 }
