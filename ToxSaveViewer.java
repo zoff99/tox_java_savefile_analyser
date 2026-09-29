@@ -365,9 +365,9 @@ public class ToxSaveViewer extends JFrame {
             byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
             
             StringBuilder det = new StringBuilder();
-            det.append("Friend #").append(i).append("\n");
-            det.append("Status: ").append(getFriendStatusName(status)).append("\n");
-            det.append("Public Key: ").append(hex(pk)).append("\n");
+            det.append("Friend #").append(i).append(" (Total: 2216 bytes)\n");
+            det.append(String.format("  [%4d bytes] Status: %s\n", 1, getFriendStatusName(status)));
+            det.append(String.format("  [%4d bytes] Public Key: %s\n", 32, hex(pk)));
             
             if (status == 1 || status == 2) {
                 int infoSize = readBE16(d, off + OFF_INFO_SIZE);
@@ -377,12 +377,17 @@ public class ToxSaveViewer extends JFrame {
                 byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
                 
                 det.append("\n--- Pending Request Details ---\n");
-                det.append("Request Message: \"").append(info.isEmpty() ? "(empty)" : info).append("\"\n");
-                det.append("Nospam: 0x").append(String.format("%08X", nospam)).append(" (").append(nospam).append(")\n");
-                det.append("Derived Tox ID: ").append(computeToxId(pk, nospamBytes)).append("\n");
+                det.append(String.format("  [%4d bytes] Request Message: \"%s\"\n", 1024, info.isEmpty() ? "(empty)" : info));
+                det.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
+                det.append(String.format("  [%4d bytes] Info Size: %d\n", 2, infoSize));
+                det.append(String.format("  [%4d bytes] Nospam: 0x%08X (%d)\n", 4, nospam, nospam));
+                det.append(String.format("  [%4d bytes] Derived Tox ID (38 bytes): %s\n", 38, computeToxId(pk, nospamBytes)));
+                
+                det.append("\n(Note: Name, Status Message, User Status, and Last Seen are zeroed/empty for pending requests)\n");
                 
                 String label = (status == 1 ? "OUT: " : "IN: ") + (info.isEmpty() ? "friend#" + i : info.substring(0, Math.min(15, info.length())));
                 s.subItems.add(makeItem(base + off, FRIEND_SIZE, label, new Color(255, 165, 0), det.toString()));
+                
             } else if (status == 3) {
                 int nameLen = readBE16(d, off + OFF_NAME_LEN);
                 if (nameLen > 128) nameLen = 128;
@@ -396,16 +401,27 @@ public class ToxSaveViewer extends JFrame {
                 long lastSeen = readBE64(d, off + OFF_LASTSEEN);
                 
                 det.append("\n--- Confirmed Friend Details ---\n");
-                det.append("Name: \"").append(name.isEmpty() ? "(empty)" : name).append("\"\n");
-                det.append("Status Message: \"").append(msg.isEmpty() ? "(empty)" : msg).append("\"\n");
-                det.append("User Status: ").append(userStatusName(userStatus)).append("\n");
-                det.append("Last Seen: ").append(formatTime(lastSeen)).append("\n");
+                det.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
+                det.append(String.format("  [%4d bytes] Info Size: 0 (ignored)\n", 2));
+                det.append(String.format("  [%4d bytes] Name: \"%s\"\n", 128, name.isEmpty() ? "(empty)" : name));
+                det.append(String.format("  [%4d bytes] Name Length: %d\n", 2, nameLen));
+                det.append(String.format("  [%4d bytes] Status Message: \"%s\"\n", 1007, msg.isEmpty() ? "(empty)" : msg));
+                det.append(String.format("  [%4d bytes] Padding (after status message)\n", 1));
+                det.append(String.format("  [%4d bytes] Status Message Length: %d\n", 2, msgLen));
+                det.append(String.format("  [%4d bytes] User Status: %s\n", 1, userStatusName(userStatus)));
+                det.append(String.format("  [%4d bytes] Padding (after user status)\n", 3));
+                det.append(String.format("  [%4d bytes] Nospam: (ignored for confirmed)\n", 4));
+                det.append(String.format("  [%4d bytes] Last Seen: %s\n", 8, formatTime(lastSeen)));
                 
                 s.subItems.add(makeItem(base + off, FRIEND_SIZE, name.isEmpty() ? ("friend#" + i) : name, PALETTE[i % PALETTE.length], det.toString()));
+                
             } else {
+                det.append("\n--- Empty Slot ---\n");
+                det.append("  (All remaining 2215 bytes are zeroed)\n");
                 s.subItems.add(makeItem(base + off, FRIEND_SIZE, "empty#" + i, Color.GRAY, det.toString()));
             }
         }
+        
         int leftover = d.length % FRIEND_SIZE;
         if (leftover > 0) {
             s.subItems.add(makeItem(base + num * FRIEND_SIZE, leftover, "pad", Color.GRAY,
