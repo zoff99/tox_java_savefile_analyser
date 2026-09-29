@@ -767,9 +767,9 @@ public class ToxSaveViewer extends JFrame {
             int status = d[off + OFF_STATUS] & 0xFF;
             byte[] pk = Arrays.copyOfRange(d, off + OFF_REAL_PK, off + OFF_REAL_PK + 32);
             
-            sb.append("========== Friend #").append(i).append(" ==========\n");
-            sb.append("Status: ").append(getFriendStatusName(status)).append("\n");
-            sb.append("Public Key: ").append(hex(pk)).append("\n");
+            sb.append("========== Friend #").append(i).append(" (Total: 2216 bytes) ==========\n");
+            sb.append(String.format("  [%4d bytes] Status: %s\n", 1, getFriendStatusName(status)));
+            sb.append(String.format("  [%4d bytes] Public Key: %s\n", 32, hex(pk)));
             
             if (status == 1 || status == 2) {
                 int infoSize = readBE16(d, off + OFF_INFO_SIZE);
@@ -778,9 +778,12 @@ public class ToxSaveViewer extends JFrame {
                 long nospam = readLE32(d, off + OFF_NOSPAM);
                 byte[] nospamBytes = Arrays.copyOfRange(d, off + OFF_NOSPAM, off + OFF_NOSPAM + 4);
                 
-                sb.append("Request Message: \"").append(info.isEmpty() ? "(empty)" : info).append("\"\n");
-                sb.append("Nospam: 0x").append(String.format("%08X", nospam)).append(" (").append(nospam).append(")\n");
-                sb.append("Derived Tox ID: ").append(computeToxId(pk, nospamBytes)).append("\n");
+                sb.append(String.format("  [%4d bytes] Request Message: \"%s\"\n", 1024, info.isEmpty() ? "(empty)" : info));
+                sb.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
+                sb.append(String.format("  [%4d bytes] Info Size: %d\n", 2, infoSize));
+                sb.append(String.format("  [%4d bytes] Nospam: 0x%08X (%d)\n", 4, nospam, nospam));
+                sb.append(String.format("  [%4d bytes] Derived Tox ID (38 bytes): %s\n", 38, computeToxId(pk, nospamBytes)));
+                sb.append("\n(Note: Name, Status Message, User Status, and Last Seen are zeroed/empty for pending requests)\n");
             } else if (status == 3) {
                 int nameLen = readBE16(d, off + OFF_NAME_LEN);
                 if (nameLen > 128) nameLen = 128;
@@ -793,10 +796,20 @@ public class ToxSaveViewer extends JFrame {
                 int userStatus = d[off + OFF_USERSTATUS] & 0xFF;
                 long lastSeen = readBE64(d, off + OFF_LASTSEEN);
                 
-                sb.append("Name: \"").append(name.isEmpty() ? "(empty)" : name).append("\"\n");
-                sb.append("Status Message: \"").append(msg.isEmpty() ? "(empty)" : msg).append("\"\n");
-                sb.append("User Status: ").append(userStatusName(userStatus)).append("\n");
-                sb.append("Last Seen: ").append(formatTime(lastSeen)).append("\n");
+                sb.append(String.format("  [%4d bytes] Padding (after info)\n", 1));
+                sb.append(String.format("  [%4d bytes] Info Size: 0 (ignored)\n", 2));
+                sb.append(String.format("  [%4d bytes] Name: \"%s\"\n", 128, name.isEmpty() ? "(empty)" : name));
+                sb.append(String.format("  [%4d bytes] Name Length: %d\n", 2, nameLen));
+                sb.append(String.format("  [%4d bytes] Status Message: \"%s\"\n", 1007, msg.isEmpty() ? "(empty)" : msg));
+                sb.append(String.format("  [%4d bytes] Padding (after status message)\n", 1));
+                sb.append(String.format("  [%4d bytes] Status Message Length: %d\n", 2, msgLen));
+                sb.append(String.format("  [%4d bytes] User Status: %s\n", 1, userStatusName(userStatus)));
+                sb.append(String.format("  [%4d bytes] Padding (after user status)\n", 3));
+                sb.append(String.format("  [%4d bytes] Nospam: (ignored for confirmed)\n", 4));
+                sb.append(String.format("  [%4d bytes] Last Seen: %s\n", 8, formatTime(lastSeen)));
+            } else {
+                sb.append("\n--- Empty Slot ---\n");
+                sb.append("  (All remaining 2215 bytes are zeroed)\n");
             }
             sb.append("\n");
         }
